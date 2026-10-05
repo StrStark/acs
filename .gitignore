@@ -1,0 +1,20 @@
+# Build output
+/bin/
+/internal/web/dist/*
+!/internal/web/dist/.gitkeep
+
+# Local data
+/data/
+*.db
+*.db-shm
+*.db-wal
+
+# Frontend
+node_modules/
+
+# Env / editors
+.env
+.idea/
+.vscode/
+.DS_Store
+/test/e2e/.work/

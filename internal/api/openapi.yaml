@@ -1,0 +1,534 @@
+openapi: 3.1.0
+info:
+  title: ACS Storage REST API
+  version: "1"
+  description: |
+    Management and integration API for ACS Storage. The S3-compatible API is
+    served separately (default port 9000) and follows the AWS S3 specification.
+
+    **Authentication** — use a session cookie (web panel) or an access key:
+    `Authorization: Bearer <ACCESS_KEY_ID>:<SECRET>` or HTTP Basic auth with the
+    key ID as user name and the secret as password.
+
+    **Errors** use RFC 9457 `application/problem+json`. POST and PATCH requests
+    must send `Content-Type: application/json`.
+servers:
+  - url: /api/v1
+security:
+  - bearerKey: []
+  - basicKey: []
+  - session: []
+
+components:
+  securitySchemes:
+    bearerKey: { type: http, scheme: bearer, description: "ACCESS_KEY_ID:SECRET" }
+    basicKey: { type: http, scheme: basic }
+    session: { type: apiKey, in: cookie, name: acs_session }
+  parameters:
+    bucket: { name: bucket, in: path, required: true, schema: { type: string } }
+    key: { name: key, in: path, required: true, description: Object key (slashes allowed), schema: { type: string } }
+    id: { name: id, in: path, required: true, schema: { type: integer } }
+    versionId: { name: versionId, in: query, schema: { type: string } }
+  responses:
+    Problem:
+      description: Error
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    NoContent: { description: No content }
+  schemas:
+    Problem:
+      type: object
+      properties:
+        type: { type: string }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        errors: { type: object, additionalProperties: { type: string }, description: Field-level validation errors }
+    User:
+      type: object
+      properties:
+        id: { type: integer }
+        username: { type: string }
+        role: { type: string, enum: [viewer, editor, admin] }
+        createdAt: { type: string, format: date-time }
+    AccessKey:
+      type: object
+      properties:
+        id: { type: string }
+        userId: { type: integer }
+        username: { type: string }
+        name: { type: string }
+        permission: { type: string, enum: [read, readwrite, full] }
+        buckets: { type: array, items: { type: string }, description: '["*"] means all buckets' }
+        createdAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+        lastUsedAt: { type: string, format: date-time }
+    Stats:
+      type: object
+      properties:
+        objects: { type: integer }
+        bytes: { type: integer }
+        storedBytes: { type: integer, description: Including noncurrent versions }
+    LifecycleRule:
+      type: object
+      properties:
+        id: { type: string }
+        enabled: { type: boolean }
+        prefix: { type: string }
+        expirationDays: { type: integer }
+        noncurrentDays: { type: integer }
+        abortMultipartDays: { type: integer }
+    CORSRule:
+      type: object
+      properties:
+        allowedOrigins: { type: array, items: { type: string } }
+        allowedMethods: { type: array, items: { type: string } }
+        allowedHeaders: { type: array, items: { type: string } }
+        exposeHeaders: { type: array, items: { type: string } }
+        maxAgeSeconds: { type: integer }
+    Bucket:
+      type: object
+      properties:
+        name: { type: string }
+        createdAt: { type: string, format: date-time }
+        versioning: { type: string, enum: ["", Enabled, Suspended] }
+        public: { type: boolean }
+        quotaBytes: { type: integer }
+        quotaObjects: { type: integer }
+        lifecycle: { type: array, items: { $ref: "#/components/schemas/LifecycleRule" } }
+        cors: { type: array, items: { $ref: "#/components/schemas/CORSRule" } }
+        stats: { $ref: "#/components/schemas/Stats" }
+    Object:
+      type: object
+      properties:
+        key: { type: string }
+        size: { type: integer }
+        etag: { type: string }
+        contentType: { type: string }
+        lastModified: { type: string, format: date-time }
+        versionId: { type: string }
+        isLatest: { type: boolean }
+        deleteMarker: { type: boolean }
+        metadata: { type: object, additionalProperties: { type: string } }
+        headers: { type: object, additionalProperties: { type: string } }
+        tags: { type: object, additionalProperties: { type: string } }
+    Share:
+      type: object
+      properties:
+        id: { type: integer }
+        token: { type: string }
+        url: { type: string }
+        type: { type: string, enum: [file, folder, upload] }
+        bucket: { type: string }
+        key: { type: string }
+        createdAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+        hasPassword: { type: boolean }
+        maxDownloads: { type: integer }
+        downloads: { type: integer }
+        views: { type: integer }
+        maxUploadBytes: { type: integer }
+        note: { type: string }
+        disabled: { type: boolean }
+    Webhook:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        url: { type: string }
+        secret: { type: string }
+        events: { type: array, items: { type: string } }
+        bucket: { type: string }
+        prefix: { type: string }
+        enabled: { type: boolean }
+
+paths:
+  /health:
+    get:
+      summary: Liveness and database check
+      security: []
+      responses: { "200": { description: OK } }
+
+  /setup:
+    get:
+      summary: Whether first-run setup is needed
+      security: []
+      responses: { "200": { description: "{ needsSetup, tokenRequired }" } }
+    post:
+      summary: Create the first admin account and sign in
+      security: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties: { username: { type: string }, password: { type: string }, setupToken: { type: string } }
+      responses: { "201": { description: Created }, "409": { $ref: "#/components/responses/Problem" } }
+
+  /auth/login:
+    post:
+      summary: Sign in with username and password (sets session cookie)
+      security: []
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { username: { type: string }, password: { type: string } } }
+      responses: { "200": { description: Signed in }, "401": { $ref: "#/components/responses/Problem" } }
+  /auth/logout:
+    post: { summary: Sign out, responses: { "204": { $ref: "#/components/responses/NoContent" } } }
+  /auth/me:
+    get: { summary: Current user (and access key, if used), responses: { "200": { description: OK } } }
+  /auth/password:
+    post:
+      summary: Change own password
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { currentPassword: { type: string }, newPassword: { type: string } } }
+      responses: { "204": { $ref: "#/components/responses/NoContent" } }
+
+  /users:
+    get:
+      summary: List users (admin)
+      responses: { "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/User" } } } } } }
+    post:
+      summary: Create user (admin)
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { username: { type: string }, password: { type: string }, role: { type: string } } }
+      responses: { "201": { description: Created } }
+  /users/{id}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    patch:
+      summary: Change role and/or reset password (admin)
+      requestBody:
+        content: { application/json: { schema: { type: object, properties: { role: { type: string }, password: { type: string } } } } }
+      responses: { "200": { description: OK } }
+    delete: { summary: Delete user (admin), responses: { "204": { $ref: "#/components/responses/NoContent" } } }
+
+  /keys:
+    get:
+      summary: List own access keys (admins may pass all=true)
+      parameters: [{ name: all, in: query, schema: { type: boolean } }]
+      responses: { "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/AccessKey" } } } } } }
+    post:
+      summary: Create an access key; the secret is returned only once
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                permission: { type: string, enum: [read, readwrite, full] }
+                buckets: { type: array, items: { type: string } }
+                expiresAt: { type: string, format: date-time }
+                userId: { type: integer, description: Admin only }
+      responses: { "201": { description: "AccessKey plus `secret`" } }
+  /keys/{id}:
+    delete:
+      summary: Revoke an access key
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses: { "204": { $ref: "#/components/responses/NoContent" } }
+
+  /buckets:
+    get:
+      summary: List buckets visible to the caller, with stats
+      responses: { "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Bucket" } } } } } }
+    post:
+      summary: Create bucket
+      requestBody:
+        content: { application/json: { schema: { type: object, properties: { name: { type: string }, versioning: { type: boolean } } } } }
+      responses: { "201": { description: Created }, "409": { $ref: "#/components/responses/Problem" } }
+  /buckets/{bucket}:
+    parameters: [{ $ref: "#/components/parameters/bucket" }]
+    get: { summary: Bucket details and stats, responses: { "200": { description: OK } } }
+    patch:
+      summary: Update versioning, public access, quotas, lifecycle or CORS
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                versioning: { type: string, enum: [Enabled, Suspended] }
+                public: { type: boolean }
+                quotaBytes: { type: integer }
+                quotaObjects: { type: integer }
+                lifecycle: { type: array, items: { $ref: "#/components/schemas/LifecycleRule" } }
+                cors: { type: array, items: { $ref: "#/components/schemas/CORSRule" } }
+      responses: { "200": { description: OK } }
+    delete:
+      summary: Delete bucket (force=true deletes all contents)
+      parameters: [{ name: force, in: query, schema: { type: boolean } }]
+      responses: { "204": { $ref: "#/components/responses/NoContent" }, "409": { $ref: "#/components/responses/Problem" } }
+
+  /buckets/{bucket}/objects:
+    get:
+      summary: List objects
+      parameters:
+        - { $ref: "#/components/parameters/bucket" }
+        - { name: prefix, in: query, schema: { type: string } }
+        - { name: delimiter, in: query, schema: { type: string }, description: 'Use "/" for folder-style listing' }
+        - { name: cursor, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, maximum: 1000 } }
+      responses: { "200": { description: "{ objects, prefixes, nextCursor }" } }
+  /buckets/{bucket}/objects/{key}:
+    parameters: [{ $ref: "#/components/parameters/bucket" }, { $ref: "#/components/parameters/key" }]
+    get:
+      summary: Download (supports Range and conditional headers)
+      parameters: [{ $ref: "#/components/parameters/versionId" }, { name: download, in: query, schema: { type: integer, enum: [1] } }]
+      responses: { "200": { description: Object content }, "206": { description: Partial content } }
+    put:
+      summary: Upload with a raw request body (Content-Type is stored; X-Acs-Meta-* headers become metadata)
+      requestBody: { content: { application/octet-stream: { schema: { type: string, format: binary } } } }
+      responses: { "201": { description: Created } }
+    delete:
+      summary: Delete (creates a delete marker in versioned buckets, or removes versionId)
+      parameters: [{ $ref: "#/components/parameters/versionId" }]
+      responses: { "200": { description: "{ versionId, deleteMarker }" } }
+  /buckets/{bucket}/meta/{key}:
+    parameters: [{ $ref: "#/components/parameters/bucket" }, { $ref: "#/components/parameters/key" }]
+    get:
+      summary: Object metadata
+      parameters: [{ $ref: "#/components/parameters/versionId" }]
+      responses: { "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Object" } } } } }
+    patch:
+      summary: Update content type, metadata, headers or tags in place
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                contentType: { type: string }
+                metadata: { type: object, additionalProperties: { type: string } }
+                headers: { type: object, additionalProperties: { type: string } }
+                tags: { type: object, additionalProperties: { type: string } }
+      responses: { "200": { description: OK } }
+  /buckets/{bucket}/versions/{key}:
+    get:
+      summary: All versions of an object, newest first
+      parameters: [{ $ref: "#/components/parameters/bucket" }, { $ref: "#/components/parameters/key" }]
+      responses: { "200": { description: OK } }
+  /buckets/{bucket}/delete:
+    post:
+      summary: Bulk delete keys, versions, or whole prefixes (folders)
+      parameters: [{ $ref: "#/components/parameters/bucket" }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                keys: { type: array, items: { type: string } }
+                prefixes: { type: array, items: { type: string } }
+                versions: { type: array, items: { type: object, properties: { key: { type: string }, versionId: { type: string } } } }
+      responses: { "200": { description: "{ deleted, errors }" } }
+  /buckets/{bucket}/copy:
+    post:
+      summary: Copy or move an object or a folder (sourceKey ending in "/") into this bucket
+      parameters: [{ $ref: "#/components/parameters/bucket" }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sourceKey, key]
+              properties:
+                sourceBucket: { type: string }
+                sourceKey: { type: string }
+                sourceVersionId: { type: string }
+                key: { type: string }
+                move: { type: boolean }
+      responses: { "200": { description: "{ count }" } }
+  /buckets/{bucket}/folders:
+    post:
+      summary: Create an empty folder marker
+      parameters: [{ $ref: "#/components/parameters/bucket" }]
+      requestBody: { content: { application/json: { schema: { type: object, properties: { prefix: { type: string } } } } } }
+      responses: { "201": { description: Created } }
+  /buckets/{bucket}/restore:
+    post:
+      summary: Make an old version current again
+      parameters: [{ $ref: "#/components/parameters/bucket" }]
+      requestBody: { content: { application/json: { schema: { type: object, properties: { key: { type: string }, versionId: { type: string } } } } } }
+      responses: { "200": { description: OK } }
+  /buckets/{bucket}/zip:
+    get:
+      summary: Download a prefix or selected keys as a ZIP stream
+      parameters:
+        - { $ref: "#/components/parameters/bucket" }
+        - { name: prefix, in: query, schema: { type: string } }
+        - { name: key, in: query, schema: { type: array, items: { type: string } }, style: form, explode: true }
+      responses: { "200": { description: application/zip } }
+  /buckets/{bucket}/uploads:
+    parameters: [{ $ref: "#/components/parameters/bucket" }]
+    get: { summary: List in-progress multipart uploads, responses: { "200": { description: OK } } }
+    post:
+      summary: Start a multipart upload
+      requestBody: { content: { application/json: { schema: { type: object, properties: { key: { type: string }, contentType: { type: string } } } } } }
+      responses: { "201": { description: "{ uploadId, key, minPartSize }" } }
+  /buckets/{bucket}/uploads/{id}/parts/{part}:
+    put:
+      summary: Upload one part (raw body). Parts except the last must be at least 5 MiB.
+      parameters:
+        - { $ref: "#/components/parameters/bucket" }
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: part, in: path, required: true, schema: { type: integer, minimum: 1, maximum: 10000 } }
+        - { name: key, in: query, required: true, schema: { type: string } }
+      responses: { "200": { description: "{ partNumber, etag, size }" } }
+  /buckets/{bucket}/uploads/{id}/complete:
+    post:
+      summary: Complete a multipart upload
+      parameters: [{ $ref: "#/components/parameters/bucket" }, { name: id, in: path, required: true, schema: { type: string } }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                key: { type: string }
+                parts: { type: array, items: { type: object, properties: { partNumber: { type: integer }, etag: { type: string } } } }
+      responses: { "200": { description: OK } }
+  /buckets/{bucket}/uploads/{id}:
+    delete:
+      summary: Abort a multipart upload
+      parameters:
+        - { $ref: "#/components/parameters/bucket" }
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: key, in: query, required: true, schema: { type: string } }
+      responses: { "204": { $ref: "#/components/responses/NoContent" } }
+
+  /shares:
+    get:
+      summary: List share links (own, or all for admins)
+      parameters: [{ name: bucket, in: query, schema: { type: string } }, { name: key, in: query, schema: { type: string } }]
+      responses: { "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Share" } } } } } }
+    post:
+      summary: Create a share link
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, bucket, key]
+              properties:
+                type: { type: string, enum: [file, folder, upload] }
+                bucket: { type: string }
+                key: { type: string, description: Object key, or prefix for folder/upload links }
+                expiresAt: { type: string, format: date-time }
+                password: { type: string }
+                maxDownloads: { type: integer }
+                maxUploadBytes: { type: integer }
+                note: { type: string }
+      responses: { "201": { description: Created } }
+  /shares/{id}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    patch:
+      summary: Update a share link (send null to clear expiresAt, maxDownloads or password)
+      requestBody: { content: { application/json: { schema: { type: object } } } }
+      responses: { "200": { description: OK } }
+    delete: { summary: Delete a share link, responses: { "204": { $ref: "#/components/responses/NoContent" } } }
+
+  /public/shares/{token}:
+    get:
+      summary: Public share info (no auth)
+      security: []
+      parameters: [{ name: token, in: path, required: true, schema: { type: string } }]
+      responses: { "200": { description: OK }, "410": { description: Expired, disabled or limit reached } }
+  /public/shares/{token}/unlock:
+    post:
+      summary: Submit the share password (sets a scoped cookie)
+      security: []
+      parameters: [{ name: token, in: path, required: true, schema: { type: string } }]
+      requestBody: { content: { application/json: { schema: { type: object, properties: { password: { type: string } } } } } }
+      responses: { "204": { $ref: "#/components/responses/NoContent" } }
+  /public/shares/{token}/list:
+    get:
+      summary: List a folder share
+      security: []
+      parameters: [{ name: token, in: path, required: true, schema: { type: string } }, { name: path, in: query, schema: { type: string } }]
+      responses: { "200": { description: OK } }
+  /public/shares/{token}/download:
+    get:
+      summary: Download from a file or folder share (download=1 counts toward the limit)
+      security: []
+      parameters:
+        - { name: token, in: path, required: true, schema: { type: string } }
+        - { name: path, in: query, schema: { type: string } }
+        - { name: download, in: query, schema: { type: integer, enum: [1] } }
+      responses: { "200": { description: Content } }
+  /public/shares/{token}/zip:
+    get:
+      summary: Download a whole folder share as ZIP
+      security: []
+      parameters: [{ name: token, in: path, required: true, schema: { type: string } }]
+      responses: { "200": { description: application/zip } }
+  /public/shares/{token}/upload/{name}:
+    put:
+      summary: Upload a file through an upload link (raw body)
+      security: []
+      parameters: [{ name: token, in: path, required: true, schema: { type: string } }, { name: name, in: path, required: true, schema: { type: string } }]
+      requestBody: { content: { application/octet-stream: { schema: { type: string, format: binary } } } }
+      responses: { "201": { description: Created }, "413": { description: Too large } }
+
+  /settings:
+    get: { summary: Server settings and effective S3 endpoint, responses: { "200": { description: OK } } }
+    put:
+      summary: Update settings (admin)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: { siteName: { type: string }, publicUrl: { type: string }, s3PublicUrl: { type: string }, region: { type: string } }
+      responses: { "200": { description: OK } }
+  /audit:
+    get:
+      summary: Audit log, newest first (admin)
+      parameters:
+        - { name: search, in: query, schema: { type: string } }
+        - { name: before, in: query, schema: { type: integer }, description: Cursor (entry id) }
+        - { name: limit, in: query, schema: { type: integer, maximum: 200 } }
+      responses: { "200": { description: OK } }
+  /webhooks:
+    get:
+      summary: List webhooks (admin)
+      responses: { "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Webhook" } } } } } }
+    post:
+      summary: Create webhook (admin)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                url: { type: string }
+                events: { type: array, items: { type: string } }
+                bucket: { type: string }
+                prefix: { type: string }
+                enabled: { type: boolean }
+      responses: { "201": { description: Created } }
+  /webhooks/events:
+    get: { summary: Event types that can be subscribed to, responses: { "200": { description: OK } } }
+  /webhooks/{id}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    put: { summary: Update webhook (admin), responses: { "200": { description: OK } } }
+    delete: { summary: Delete webhook (admin), responses: { "204": { $ref: "#/components/responses/NoContent" } } }
+  /webhooks/{id}/test:
+    post:
+      summary: Send a ping event synchronously
+      parameters: [{ $ref: "#/components/parameters/id" }]
+      responses: { "200": { description: Delivery result } }
+  /webhooks/{id}/deliveries:
+    get:
+      summary: Recent deliveries
+      parameters: [{ $ref: "#/components/parameters/id" }]
+      responses: { "200": { description: OK } }
+  /system:
+    get: { summary: Version, uptime, disk usage and totals, responses: { "200": { description: OK } } }

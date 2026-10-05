@@ -1,0 +1,27 @@
+services:
+  acs:
+    build:
+      context: .
+      args:
+        VERSION: ${ACS_VERSION:-0.1.0}
+    image: acs-server:${ACS_VERSION:-0.1.0}
+    container_name: acs
+    restart: unless-stopped
+    ports:
+      - "${ACS_PORT:-8080}:8080"     # web panel + REST API
+      - "${ACS_S3_PORT:-9000}:9000"  # S3-compatible API
+    environment:
+      ACS_LOG_LEVEL: ${ACS_LOG_LEVEL:-info}
+      # Set to true when the panel is served over HTTPS.
+      ACS_COOKIE_SECURE: ${ACS_COOKIE_SECURE:-false}
+      # Optional: require this token to create the first admin account.
+      ACS_SETUP_TOKEN: ${ACS_SETUP_TOKEN:-}
+      # Optional: enable /metrics (Prometheus) protected by this bearer token.
+      ACS_METRICS_TOKEN: ${ACS_METRICS_TOKEN:-}
+      # Optional: base domain for virtual-hosted-style S3 (bucket.s3.example.com).
+      ACS_S3_DOMAIN: ${ACS_S3_DOMAIN:-}
+    volumes:
+      - acs-data:/data
+
+volumes:
+  acs-data:

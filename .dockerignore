@@ -1,0 +1,7 @@
+.git
+**/node_modules
+internal/web/dist
+data
+*.db
+.env
+test/e2e/.work
