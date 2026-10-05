@@ -13,12 +13,12 @@ set -euo pipefail
 # Docker Desktop only shares paths under $HOME, so keep scratch files in the repo.
 WORK="$(cd "$(dirname "$0")" && pwd)/.work/$$"
 mkdir -p "$WORK"
-trap 'rm -rf "$WORK"' EXIT
+trap 'rm -rf "$WORK" 2>/dev/null || true' EXIT
 BUCKET="e2e-$(date +%s)"
 pass=0
 
 aws() {
-  docker run --rm --network host -v "$WORK:/work" -w /work \
+  docker run --rm --network host --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$WORK:/work" -w /work \
     -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION=us-east-1 \
     amazon/aws-cli --endpoint-url "$ACS_S3" "$@"
 }

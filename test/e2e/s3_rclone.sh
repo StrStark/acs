@@ -5,13 +5,13 @@ set -euo pipefail
 
 WORK="$(cd "$(dirname "$0")" && pwd)/.work/rclone-$$"
 mkdir -p "$WORK/src/a/b"
-trap 'rm -rf "$WORK"' EXIT
+trap 'rm -rf "$WORK" 2>/dev/null || true' EXIT
 for i in $(seq 1 20); do head -c $((RANDOM * 10)) /dev/urandom > "$WORK/src/f$i.bin"; done
 head -c 9000000 /dev/urandom > "$WORK/src/a/b/large.bin"
 echo "unicode name" > "$WORK/src/a/héllo wörld (1).txt"
 
 rc() {
-  docker run --rm --network host -v "$WORK:/work" \
+  docker run --rm --network host --user "$(id -u):$(id -g)" -e HOME=/tmp -e RCLONE_CONFIG=/tmp/rclone.conf -v "$WORK:/work" \
     -e RCLONE_CONFIG_ACS_TYPE=s3 -e RCLONE_CONFIG_ACS_PROVIDER=Other \
     -e RCLONE_CONFIG_ACS_ENDPOINT="$ACS_S3" -e RCLONE_CONFIG_ACS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
     -e RCLONE_CONFIG_ACS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" -e RCLONE_CONFIG_ACS_FORCE_PATH_STYLE=true \
