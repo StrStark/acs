@@ -26,6 +26,7 @@ import (
 	"acs/internal/secret"
 	"acs/internal/settings"
 	"acs/internal/share"
+	"acs/internal/storage"
 	"acs/internal/version"
 	"acs/internal/web"
 	"acs/internal/webhook"
@@ -76,6 +77,12 @@ func run(cfg config.Config) error {
 	}
 	defer objects.Close()
 
+	backends, err := storage.Open(ctx, database, box, cfg.DataDir)
+	if err != nil {
+		return fmt.Errorf("open storage backends: %w", err)
+	}
+	objects.SetBackends(backends)
+
 	settingsStore, err := settings.Open(ctx, database)
 	if err != nil {
 		return err
@@ -100,11 +107,12 @@ func run(cfg config.Config) error {
 
 	objects.Run(ctx)
 	hooks.Run(ctx)
+	go backends.Run(ctx)
 	go maintenance(ctx, authSvc, auditLog, cfg.AuditRetention)
 
 	panel := api.NewServer(api.Deps{
 		Config: cfg, DB: database, Auth: authSvc, Objects: objects, Shares: shares,
-		Webhooks: hooks, Audit: auditLog, Settings: settingsStore, Metrics: reg,
+		Webhooks: hooks, Audit: auditLog, Settings: settingsStore, Metrics: reg, Storage: backends,
 	})
 	servers := []*http.Server{{
 		Addr:              cfg.Listen,

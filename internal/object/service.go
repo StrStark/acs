@@ -45,8 +45,9 @@ type Event struct {
 }
 
 type Service struct {
-	db    *pebble.DB
-	blobs *blob.Store
+	db       *pebble.DB
+	local    *blob.Local
+	backends Backends
 
 	// keyLocks serialise read-modify-write of a single object's metadata.
 	keyLocks [512]sync.Mutex
@@ -66,12 +67,12 @@ func Open(metaDir, dataDir string) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	blobs, err := blob.Open(dataDir)
+	local, err := blob.OpenLocal(dataDir)
 	if err != nil {
 		db.Close()
 		return nil, err
 	}
-	return &Service{db: db, blobs: blobs}, nil
+	return &Service{db: db, local: local}, nil
 }
 
 func (s *Service) Close() error { return s.db.Close() }
@@ -219,22 +220,29 @@ func (s *Service) scan(start, end []byte, fn func(key, val []byte) (bool, error)
 	return it.Error()
 }
 
+// gcEntry is the value of a G key: when the blob was released and where it lives.
+type gcEntry struct {
+	Time  time.Time `json:"t"`
+	Store string    `json:"st,omitempty"`
+}
+
 // enqueueGC schedules the blobs of o for deletion once b commits.
 func (s *Service) enqueueGC(b *pebble.Batch, o *Object) {
-	if len(o.Parts) == 0 {
-		return
-	}
-	ts := []byte(time.Now().UTC().Format(time.RFC3339))
+	now := time.Now().UTC()
 	for _, p := range o.Parts {
-		b.Set(gcKey(p.Blob), ts, nil)
+		setJSON(b, gcKey(p.Blob), gcEntry{Time: now, Store: p.Store})
 	}
 }
 
 // deleteBlobsNow removes blobs that were never referenced by committed metadata.
 func (s *Service) deleteBlobsNow(parts []PartRef) {
 	for _, p := range parts {
-		if err := s.blobs.Delete(p.Blob); err != nil {
-			slog.Warn("delete blob", "blob", p.Blob, "err", err)
+		st, err := s.store(p.Store)
+		if err == nil {
+			err = st.Delete(context.Background(), p.Blob)
+		}
+		if err != nil {
+			slog.Warn("delete blob", "blob", p.Blob, "store", p.Store, "err", err)
 		}
 	}
 }

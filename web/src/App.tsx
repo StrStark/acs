@@ -12,6 +12,7 @@ import { BucketPage } from "./pages/BucketPage";
 import { SharesPage } from "./pages/SharesPage";
 import { KeysPage } from "./pages/KeysPage";
 import { UsersPage } from "./pages/UsersPage";
+import { StoragePage } from "./pages/StoragePage";
 import { WebhooksPage } from "./pages/WebhooksPage";
 import { AuditPage } from "./pages/AuditPage";
 import { SettingsPage } from "./pages/SettingsPage";
@@ -71,6 +72,7 @@ function AuthenticatedApp() {
         <Route path="buckets/:bucket/*" element={<BucketPage />} />
         <Route path="shares" element={<SharesPage />} />
         <Route path="keys" element={<KeysPage />} />
+        <Route path="storage" element={<StoragePage />} />
         <Route path="users" element={<UsersPage />} />
         <Route path="webhooks" element={<WebhooksPage />} />
         <Route path="audit" element={<AuditPage />} />

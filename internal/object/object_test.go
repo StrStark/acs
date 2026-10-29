@@ -26,7 +26,7 @@ func newTestService(t *testing.T) *Service {
 
 func mustBucket(t *testing.T, s *Service, name string) {
 	t.Helper()
-	if _, err := s.CreateBucket(context.Background(), name); err != nil {
+	if _, err := s.CreateBucket(context.Background(), name, BucketOptions{}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -64,11 +64,11 @@ func randBytes(n int) []byte {
 func TestBucketLifecycle(t *testing.T) {
 	ctx := context.Background()
 	s := newTestService(t)
-	if _, err := s.CreateBucket(ctx, "Bad_Name"); !errors.Is(err, ErrInvalidBucketName) {
+	if _, err := s.CreateBucket(ctx, "Bad_Name", BucketOptions{}); !errors.Is(err, ErrInvalidBucketName) {
 		t.Fatalf("got %v", err)
 	}
 	mustBucket(t, s, "photos")
-	if _, err := s.CreateBucket(ctx, "photos"); !errors.Is(err, ErrBucketExists) {
+	if _, err := s.CreateBucket(ctx, "photos", BucketOptions{}); !errors.Is(err, ErrBucketExists) {
 		t.Fatalf("got %v", err)
 	}
 	put(t, s, "photos", "a.jpg", []byte("x"))
@@ -434,7 +434,7 @@ func TestOrphanScrub(t *testing.T) {
 	mustBucket(t, s, "bk-o")
 	put(t, s, "bk-o", "kept", randBytes(inlineMax+1))
 	// Simulate a crash after writing a blob but before committing metadata.
-	if _, _, _, err := s.blobs.CopyFrom(bytes.NewReader(randBytes(10))); err != nil {
+	if _, _, _, err := s.local.Put(context.Background(), bytes.NewReader(randBytes(10))); err != nil {
 		t.Fatal(err)
 	}
 	n, err := s.RemoveOrphans(time.Now().Add(time.Minute))

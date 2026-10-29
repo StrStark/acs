@@ -80,6 +80,11 @@ export type Bucket = {
   // Omitted by the server when empty.
   lifecycle?: LifecycleRule[];
   cors?: CORSRule[];
+  /** Storage backend ID; absent = built-in disk. */
+  backend?: string;
+  /** "mirror" for live views of a remote S3 bucket. */
+  mode?: "" | "mirror";
+  remotePrefix?: string;
   stats: Stats;
 };
 
@@ -210,7 +215,7 @@ export const changePassword = (body: { currentPassword: string; newPassword: str
 
 export const listBuckets = () => api<Bucket[]>("/buckets");
 export const getBucket = (name: string) => api<Bucket>(`/buckets/${name}`);
-export const createBucket = (body: { name: string; versioning: boolean }) =>
+export const createBucket = (body: { name: string; versioning: boolean; backend?: string; mode?: string; remotePrefix?: string }) =>
   api<Bucket>("/buckets", { method: "POST", body });
 export const updateBucket = (name: string, body: Partial<Omit<Bucket, "name" | "createdAt" | "stats">>) =>
   api<Bucket>(`/buckets/${name}`, { method: "PATCH", body });
@@ -334,3 +339,57 @@ export const publicDownloadUrl = (token: string, opts: { path?: string; download
   `/api/v1${pub(token)}/download${qs({ path: opts.path, download: opts.download ? 1 : undefined })}`;
 export const publicZipUrl = (token: string) => `/api/v1${pub(token)}/zip`;
 export const publicUploadUrl = (token: string, name: string) => `/api/v1${pub(token)}/upload/${encodeKey(name)}`;
+
+// ---- storage backends ----
+
+export type BackendStatus = {
+  online: boolean;
+  error?: string;
+  checkedAt: string;
+  totalBytes?: number;
+  freeBytes?: number;
+};
+export type StorageBackend = {
+  id: string;
+  name: string;
+  type: "local" | "s3";
+  createdAt: string;
+  path?: string;
+  provider?: string;
+  endpoint?: string;
+  region?: string;
+  bucket?: string;
+  prefix?: string;
+  accessKey?: string;
+  pathStyle?: boolean;
+  insecureTls?: boolean;
+  status: BackendStatus;
+  buckets: number;
+  storedBytes: number;
+};
+export type StorageList = {
+  builtin: { id: ""; name: string; type: "local"; path?: string; builtin: true; status: BackendStatus };
+  builtinBuckets: number;
+  builtinStoredBytes: number;
+  backends: StorageBackend[];
+};
+export type BackendInput = {
+  name: string;
+  type: "local" | "s3";
+  path?: string;
+  provider?: string;
+  endpoint?: string;
+  region?: string;
+  bucket?: string;
+  prefix?: string;
+  accessKey?: string;
+  secretKey?: string;
+  pathStyle?: boolean;
+  insecureTls?: boolean;
+};
+export const listStorage = () => api<StorageList>("/storage");
+export const createStorage = (body: BackendInput) => api<StorageBackend>("/storage", { method: "POST", body });
+export const testStorage = (body: BackendInput) => api<{ ok: boolean; error?: string }>("/storage/test", { method: "POST", body });
+export const updateStorage = (id: string, body: BackendInput) => api<StorageBackend>(`/storage/${id}`, { method: "PATCH", body });
+export const deleteStorage = (id: string) => api<void>(`/storage/${id}`, { method: "DELETE" });
+export const checkStorage = (id: string) => api<StorageBackend>(`/storage/${id}/check`, { method: "POST", body: {} });

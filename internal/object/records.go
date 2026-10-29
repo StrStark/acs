@@ -31,7 +31,16 @@ type Bucket struct {
 	QuotaObjects int64           `json:"quotaObjects,omitempty"`
 	Lifecycle    []LifecycleRule `json:"lifecycle,omitempty"`
 	CORS         []CORSRule      `json:"cors,omitempty"`
+	// Backend is the storage backend holding the data ("" = built-in disk).
+	Backend string `json:"backend,omitempty"`
+	// Mode is ModeStore or ModeMirror.
+	Mode string `json:"mode,omitempty"`
+	// RemotePrefix is the key prefix inside the remote bucket (mirror mode).
+	RemotePrefix string `json:"remotePrefix,omitempty"`
 }
+
+// Mirror reports whether the bucket is a live view of a remote bucket.
+func (b *Bucket) Mirror() bool { return b.Mode == ModeMirror }
 
 type LifecycleRule struct {
 	ID      string `json:"id"`
@@ -73,12 +82,17 @@ type Object struct {
 	Tags    map[string]string `json:"tg,omitempty"`
 	Inline  []byte            `json:"in,omitempty"`
 	Parts   []PartRef         `json:"pt,omitempty"`
+
+	// remote is set for objects of mirror buckets; their data lives there.
+	remote Remote
 }
 
 // PartRef points at a blob holding a contiguous slice of the object's data.
 type PartRef struct {
 	Blob string `json:"b"`
 	Size int64  `json:"s"`
+	// Store is the backend holding the blob ("" = built-in disk).
+	Store string `json:"st,omitempty"`
 }
 
 // PartsCount returns the number of multipart parts, or 0 for a simple upload.
@@ -106,8 +120,11 @@ type Part struct {
 	Size    int64     `json:"sz"`
 	ETag    string    `json:"etag"`
 	Blob    string    `json:"b"`
+	Store   string    `json:"st,omitempty"`
 	ModTime time.Time `json:"mt"`
 }
+
+func (p *Part) ref() PartRef { return PartRef{Blob: p.Blob, Size: p.Size, Store: p.Store} }
 
 // Stats are maintained incrementally per bucket.
 type Stats struct {

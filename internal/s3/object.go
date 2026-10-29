@@ -479,9 +479,14 @@ func (s *Server) getObjectTagging(q *request) {
 		s.writeError(q, fromObjectErr(err))
 		return
 	}
+	tags, err := s.objects.ObjectTags(q.r.Context(), q.bucket, q.key, q.query.Get("versionId"))
+	if err != nil {
+		s.writeError(q, fromObjectErr(err))
+		return
+	}
 	t := tagging{Xmlns: xmlns}
 	t.TagSet.Tags = []tag{}
-	for k, v := range o.Tags {
+	for k, v := range tags {
 		t.TagSet.Tags = append(t.TagSet.Tags, tag{Key: k, Value: v})
 	}
 	if o.VersionID != object.NullVersion {

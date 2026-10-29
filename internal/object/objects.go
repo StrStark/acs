@@ -44,8 +44,24 @@ type data struct {
 	md5    []byte
 }
 
-// writeData stores r either inline or in a blob.
-func (s *Service) writeData(r io.Reader) (*data, error) {
+// errCapture remembers the first error returned by the wrapped reader, so a
+// client-side failure (e.g. a signature mismatch in a streamed body) is
+// reported as-is even if the storage backend wraps it.
+type errCapture struct {
+	r   io.Reader
+	err error
+}
+
+func (e *errCapture) Read(p []byte) (int, error) {
+	n, err := e.r.Read(p)
+	if err != nil && err != io.EOF && e.err == nil {
+		e.err = err
+	}
+	return n, err
+}
+
+// writeData stores r either inline or as a blob in the given backend.
+func (s *Service) writeData(ctx context.Context, backend string, r io.Reader) (*data, error) {
 	buf := make([]byte, inlineMax+1)
 	n, err := io.ReadFull(r, buf)
 	switch {
@@ -56,24 +72,19 @@ func (s *Service) writeData(r io.Reader) (*data, error) {
 		return nil, err
 	}
 
-	w, err := s.blobs.Create()
+	st, err := s.store(backend)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := w.Write(buf); err != nil {
-		w.Abort()
-		return nil, err
-	}
-	if _, err := io.Copy(w, r); err != nil {
-		w.Abort()
-		return nil, err
-	}
-	size := w.Size()
-	id, sum, err := w.Commit()
+	src := &errCapture{r: io.MultiReader(bytes.NewReader(buf), r)}
+	id, size, sum, err := st.Put(ctx, src)
 	if err != nil {
+		if src.err != nil {
+			return nil, src.err
+		}
 		return nil, err
 	}
-	return &data{parts: []PartRef{{Blob: id, Size: size}}, size: size, md5: sum}, nil
+	return &data{parts: []PartRef{{Blob: id, Size: size, Store: backend}}, size: size, md5: sum}, nil
 }
 
 func (s *Service) PutObject(ctx context.Context, bucket, key string, r io.Reader, opts PutOptions) (*Object, error) {
@@ -84,13 +95,16 @@ func (s *Service) PutObject(ctx context.Context, bucket, key string, r io.Reader
 	if err != nil {
 		return nil, err
 	}
+	if b.Mirror() {
+		return s.mirrorPut(ctx, b, key, r, opts)
+	}
 	// Cheap early rejection; the exact check (which accounts for an
 	// overwritten version being freed) runs at commit.
 	if b.QuotaBytes > 0 && opts.Size > b.QuotaBytes {
 		return nil, ErrQuotaExceeded
 	}
 
-	d, err := s.writeData(r)
+	d, err := s.writeData(ctx, b.Backend, r)
 	if err != nil {
 		return nil, err
 	}
@@ -317,16 +331,34 @@ func (s *Service) versions(bucket, key string) ([]*Object, error) {
 
 // ObjectVersions returns every version of a key (newest first).
 func (s *Service) ObjectVersions(ctx context.Context, bucket, key string) ([]*Object, error) {
-	if _, err := s.GetBucket(ctx, bucket); err != nil {
+	b, err := s.GetBucket(ctx, bucket)
+	if err != nil {
 		return nil, err
+	}
+	if b.Mirror() {
+		o, err := s.mirrorStat(ctx, b, key)
+		if errors.Is(err, ErrNoSuchKey) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		return []*Object{o}, nil
 	}
 	return s.versions(bucket, key)
 }
 
 // StatObject returns metadata for the current object, or a specific version.
 func (s *Service) StatObject(ctx context.Context, bucket, key, versionID string) (*Object, error) {
-	if _, err := s.GetBucket(ctx, bucket); err != nil {
+	b, err := s.GetBucket(ctx, bucket)
+	if err != nil {
 		return nil, err
+	}
+	if b.Mirror() {
+		if versionID != "" && versionID != NullVersion {
+			return nil, ErrNoSuchVersion
+		}
+		return s.mirrorStat(ctx, b, key)
 	}
 	if versionID == "" {
 		o, err := s.current(bucket, key)
@@ -354,11 +386,6 @@ func (s *Service) StatObject(ctx context.Context, bucket, key, versionID string)
 	return o, nil
 }
 
-// Open returns a reader over the object's data.
-func (s *Service) Open(o *Object) ReadSeekCloser {
-	return newReader(s.blobs, o)
-}
-
 type DeleteResult struct {
 	VersionID    string
 	DeleteMarker bool
@@ -370,6 +397,9 @@ func (s *Service) DeleteObject(ctx context.Context, bucket, key, versionID strin
 	b, err := s.GetBucket(ctx, bucket)
 	if err != nil {
 		return DeleteResult{}, err
+	}
+	if b.Mirror() {
+		return s.mirrorDelete(ctx, b, key, versionID)
 	}
 	if versionID != "" {
 		return s.deleteVersion(ctx, bucket, key, versionID)
@@ -464,6 +494,9 @@ func (s *Service) CopyObject(ctx context.Context, srcBucket, srcKey, dstBucket, 
 	if err != nil {
 		return nil, err
 	}
+	if dstB.Mirror() {
+		return s.mirrorCopy(ctx, src, dstB, dstKey, opts)
+	}
 
 	meta := func(o *Object) {
 		o.ContentType, o.UserMeta, o.Headers = src.ContentType, src.UserMeta, src.Headers
@@ -485,7 +518,7 @@ func (s *Service) CopyObject(ctx context.Context, srcBucket, srcKey, dstBucket, 
 		return nil, err
 	}
 	r := s.Open(src)
-	d, err := s.writeData(r)
+	d, err := s.writeData(ctx, dstB.Backend, r)
 	r.Close()
 	if err != nil {
 		return nil, err
@@ -516,7 +549,9 @@ func (s *Service) MoveObject(ctx context.Context, srcBucket, srcKey, dstBucket, 
 	if err != nil {
 		return nil, err
 	}
-	if srcB.Versioning != VersioningOff || dstB.Versioning != VersioningOff {
+	// Re-linking data only works within one store-mode backend.
+	if srcB.Versioning != VersioningOff || dstB.Versioning != VersioningOff ||
+		srcB.Mirror() || dstB.Mirror() || srcB.Backend != dstB.Backend {
 		o, err := s.CopyObject(ctx, srcBucket, srcKey, dstBucket, dstKey, CopyOptions{})
 		if err != nil {
 			return nil, err
@@ -605,16 +640,24 @@ func (s *Service) updateVersion(ctx context.Context, bucket, key, versionID stri
 
 // SetObjectTags replaces the tags of the current object or a version.
 func (s *Service) SetObjectTags(ctx context.Context, bucket, key, versionID string, tags map[string]string) (*Object, error) {
-	if _, err := s.GetBucket(ctx, bucket); err != nil {
+	b, err := s.GetBucket(ctx, bucket)
+	if err != nil {
 		return nil, err
+	}
+	if b.Mirror() {
+		return s.mirrorSetTags(ctx, b, key, tags)
 	}
 	return s.updateVersion(ctx, bucket, key, versionID, func(o *Object) { o.Tags = tags })
 }
 
 // UpdateObjectMetadata replaces content type, user metadata and headers in place.
 func (s *Service) UpdateObjectMetadata(ctx context.Context, bucket, key string, contentType string, userMeta, headers map[string]string) (*Object, error) {
-	if _, err := s.GetBucket(ctx, bucket); err != nil {
+	b, err := s.GetBucket(ctx, bucket)
+	if err != nil {
 		return nil, err
+	}
+	if b.Mirror() {
+		return s.mirrorUpdateMeta(ctx, b, key, contentType, userMeta, headers)
 	}
 	return s.updateVersion(ctx, bucket, key, "", func(o *Object) {
 		if contentType != "" {
@@ -622,4 +665,25 @@ func (s *Service) UpdateObjectMetadata(ctx context.Context, bucket, key string, 
 		}
 		o.UserMeta, o.Headers = userMeta, headers
 	})
+}
+
+// ObjectTags returns an object's tags. Mirror buckets fetch them from the
+// remote, since StatObject does not load them there.
+func (s *Service) ObjectTags(ctx context.Context, bucket, key, versionID string) (map[string]string, error) {
+	b, err := s.GetBucket(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	if b.Mirror() {
+		rem, err := s.mirror(b)
+		if err != nil {
+			return nil, err
+		}
+		return rem.GetTags(ctx, key)
+	}
+	o, err := s.StatObject(ctx, bucket, key, versionID)
+	if err != nil {
+		return nil, err
+	}
+	return o.Tags, nil
 }

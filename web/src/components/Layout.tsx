@@ -3,6 +3,7 @@ import { NavLink, Outlet, useNavigate } from "react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Database,
+  HardDrive,
   KeyRound,
   LayoutDashboard,
   Link2,
@@ -26,6 +27,7 @@ const nav: NavItem[] = [
   { label: "Buckets", icon: Database, to: "/buckets" },
   { label: "Share links", icon: Link2, to: "/shares" },
   { label: "Access keys", icon: KeyRound, to: "/keys" },
+  { label: "Storage", icon: HardDrive, to: "/storage", admin: true },
   { label: "Users", icon: Users, to: "/users", admin: true },
   { label: "Webhooks", icon: Webhook, to: "/webhooks", admin: true },
   { label: "Audit log", icon: ScrollText, to: "/audit", admin: true },

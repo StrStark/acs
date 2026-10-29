@@ -56,8 +56,12 @@ func (l *lister) entry() (name string, isPrefix bool) {
 
 // List returns objects in bucket like S3 ListObjects.
 func (s *Service) List(ctx context.Context, bucket string, opts ListOptions) (*ListResult, error) {
-	if _, err := s.GetBucket(ctx, bucket); err != nil {
+	b, err := s.GetBucket(ctx, bucket)
+	if err != nil {
 		return nil, err
+	}
+	if b.Mirror() {
+		return s.mirrorList(ctx, b, opts)
 	}
 	max := clampMax(opts.MaxKeys)
 	base := objPrefix(bucket)
@@ -138,8 +142,21 @@ type ListVersionsResult struct {
 
 // ListVersions returns all object versions like S3 ListObjectVersions.
 func (s *Service) ListVersions(ctx context.Context, bucket string, opts ListVersionsOptions) (*ListVersionsResult, error) {
-	if _, err := s.GetBucket(ctx, bucket); err != nil {
+	b, err := s.GetBucket(ctx, bucket)
+	if err != nil {
 		return nil, err
+	}
+	if b.Mirror() {
+		// A mirror exposes only current objects, each as the "null" version.
+		lr, err := s.mirrorList(ctx, b, ListOptions{Prefix: opts.Prefix, Delimiter: opts.Delimiter, Marker: opts.KeyMarker, MaxKeys: opts.MaxKeys})
+		if err != nil {
+			return nil, err
+		}
+		res := &ListVersionsResult{Versions: lr.Objects, CommonPrefixes: lr.CommonPrefixes, IsTruncated: lr.IsTruncated}
+		if lr.IsTruncated {
+			res.NextKeyMarker, res.NextVersionIDMarker = lr.NextMarker, NullVersion
+		}
+		return res, nil
 	}
 	max := clampMax(opts.MaxKeys)
 	base := verPrefix(bucket)

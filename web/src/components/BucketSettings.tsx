@@ -23,6 +23,13 @@ export function BucketSettings({ bucket }: { bucket: Bucket }) {
 
   return (
     <div className="max-w-3xl space-y-6">
+      {bucket.mode === "mirror" && (
+        <Alert tone="info">
+          This bucket mirrors {bucket.remotePrefix ? <code>{bucket.remotePrefix}</code> : "the root"} of an S3 provider. Files stay at the provider with
+          their real names; versioning, quotas and lifecycle rules are managed there, not in ACS. Deleting this bucket only removes the mirror.
+        </Alert>
+      )}
+      {bucket.mode !== "mirror" && (
       <Section title="Versioning" description="Keep previous versions when objects are overwritten or deleted.">
         <Toggle
           checked={bucket.versioning === "Enabled"}
@@ -36,6 +43,7 @@ export function BucketSettings({ bucket }: { bucket: Bucket }) {
           }
         />
       </Section>
+      )}
 
       <Section title="Public access" description="Allow anyone to read objects without credentials.">
         <Toggle
@@ -52,8 +60,12 @@ export function BucketSettings({ bucket }: { bucket: Bucket }) {
         )}
       </Section>
 
-      <QuotaSection bucket={bucket} saving={save.isPending} onSave={(q) => save.mutate(q)} />
-      <LifecycleSection bucket={bucket} saving={save.isPending} onSave={(lifecycle) => save.mutate({ lifecycle })} />
+      {bucket.mode !== "mirror" && (
+        <>
+          <QuotaSection bucket={bucket} saving={save.isPending} onSave={(q) => save.mutate(q)} />
+          <LifecycleSection bucket={bucket} saving={save.isPending} onSave={(lifecycle) => save.mutate({ lifecycle })} />
+        </>
+      )}
       <CorsSection bucket={bucket} saving={save.isPending} onSave={(cors) => save.mutate({ cors })} />
       <DangerZone bucket={bucket} />
     </div>
@@ -215,7 +227,9 @@ function DangerZone({ bucket }: { bucket: Bucket }) {
     <Card className="border-red-200 p-5 dark:border-red-900/60">
       <h3 className="font-semibold text-red-700 dark:text-red-400">Delete bucket</h3>
       <p className="mb-4 mt-0.5 text-sm text-zinc-500 dark:text-zinc-400">
-        Permanently deletes the bucket, every object and version in it, and all of its share links.
+        {bucket.mode === "mirror"
+          ? "Removes this mirror and its share links. Files at the provider are not touched."
+          : "Permanently deletes the bucket, every object and version in it, and all of its share links."}
       </p>
       <Button variant="danger" icon={Trash2} onClick={() => setOpen(true)}>
         Delete bucket
@@ -229,7 +243,10 @@ function DangerZone({ bucket }: { bucket: Bucket }) {
         confirmLabel="Delete permanently"
       >
         <p className="mb-3">
-          This deletes {bucket.stats.objects} objects ({formatBytes(bucket.stats.storedBytes)}) and cannot be undone. Type the bucket name to confirm.
+          {bucket.mode === "mirror"
+            ? "Files at the provider stay where they are."
+            : `This deletes ${bucket.stats.objects} objects (${formatBytes(bucket.stats.storedBytes)}) and cannot be undone.`}{" "}
+          Type the bucket name to confirm.
         </p>
         <Field value={confirmName} onChange={(e) => setConfirmName(e.target.value)} placeholder={bucket.name} aria-label="Bucket name" />
       </ConfirmDialog>

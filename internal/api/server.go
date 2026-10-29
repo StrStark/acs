@@ -15,6 +15,7 @@ import (
 	"acs/internal/object"
 	"acs/internal/settings"
 	"acs/internal/share"
+	"acs/internal/storage"
 	"acs/internal/webhook"
 )
 
@@ -28,6 +29,7 @@ type Deps struct {
 	Audit    *audit.Log
 	Settings *settings.Store
 	Metrics  *metrics.Registry
+	Storage  *storage.Manager
 }
 
 type Server struct {
@@ -40,6 +42,7 @@ type Server struct {
 	audit    *audit.Log
 	settings *settings.Store
 	metrics  *metrics.Registry
+	storage  *storage.Manager
 	limiter  *auth.AttemptLimiter
 	// shareLimiter throttles share password attempts per client.
 	shareLimiter *auth.AttemptLimiter
@@ -57,6 +60,7 @@ func NewServer(d Deps) *Server {
 		audit:        d.Audit,
 		settings:     d.Settings,
 		metrics:      d.Metrics,
+		storage:      d.Storage,
 		limiter:      auth.NewAttemptLimiter(10, time.Minute),
 		shareLimiter: auth.NewAttemptLimiter(20, time.Minute),
 		startedAt:    time.Now(),
@@ -132,6 +136,14 @@ func (s *Server) Handler(panel http.Handler) http.Handler {
 	m.HandleFunc("GET /api/v1/public/shares/{token}/download", s.handlePublicDownload)
 	m.HandleFunc("GET /api/v1/public/shares/{token}/zip", s.handlePublicZip)
 	m.HandleFunc("PUT /api/v1/public/shares/{token}/upload/{name...}", s.handlePublicUpload)
+
+	// Storage backends.
+	m.HandleFunc("GET /api/v1/storage", a(s.handleListStorage))
+	m.HandleFunc("POST /api/v1/storage", a(s.handleCreateStorage))
+	m.HandleFunc("POST /api/v1/storage/test", a(s.handleTestStorage))
+	m.HandleFunc("PATCH /api/v1/storage/{id}", a(s.handleUpdateStorage))
+	m.HandleFunc("DELETE /api/v1/storage/{id}", a(s.handleDeleteStorage))
+	m.HandleFunc("POST /api/v1/storage/{id}/check", a(s.handleCheckStorage))
 
 	// Administration.
 	m.HandleFunc("GET /api/v1/settings", a(s.handleGetSettings))

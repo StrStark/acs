@@ -22,8 +22,12 @@ func (s *Service) CreateUpload(ctx context.Context, bucket, key string, opts Put
 	if !ValidKey(key) {
 		return nil, ErrInvalidKey
 	}
-	if _, err := s.GetBucket(ctx, bucket); err != nil {
+	b, err := s.GetBucket(ctx, bucket)
+	if err != nil {
 		return nil, err
+	}
+	if b.Mirror() {
+		return s.mirrorCreateUpload(ctx, b, key, opts)
 	}
 	u := &Upload{
 		Bucket: bucket, Key: key, ID: randomID(), Initiated: time.Now().UTC(),
@@ -38,8 +42,13 @@ func (s *Service) CreateUpload(ctx context.Context, bucket, key string, opts Put
 }
 
 func (s *Service) GetUpload(ctx context.Context, bucket, key, uploadID string) (*Upload, error) {
-	if _, err := s.GetBucket(ctx, bucket); err != nil {
+	b, err := s.GetBucket(ctx, bucket)
+	if err != nil {
 		return nil, err
+	}
+	if b.Mirror() {
+		// The provider validates the upload ID on every call.
+		return &Upload{Bucket: bucket, Key: key, ID: uploadID}, nil
 	}
 	var u Upload
 	ok, err := s.getJSON(uploadKey(bucket, key, uploadID), &u)
@@ -58,15 +67,34 @@ func (s *Service) UploadPart(ctx context.Context, bucket, key, uploadID string, 
 	if num < 1 || num > MaxPartNum {
 		return nil, fmt.Errorf("%w: part number must be between 1 and %d", ErrInvalidArgument, MaxPartNum)
 	}
-	if _, err := s.GetUpload(ctx, bucket, key, uploadID); err != nil {
-		return nil, err
-	}
-	id, n, sum, err := s.blobs.CopyFrom(r)
+	b, err := s.GetBucket(ctx, bucket)
 	if err != nil {
 		return nil, err
 	}
+	if b.Mirror() {
+		rem, err := s.mirror(b)
+		if err != nil {
+			return nil, err
+		}
+		return rem.UploadPart(ctx, key, uploadID, num, r, size)
+	}
+	if _, err := s.GetUpload(ctx, bucket, key, uploadID); err != nil {
+		return nil, err
+	}
+	st, err := s.store(b.Backend)
+	if err != nil {
+		return nil, err
+	}
+	src := &errCapture{r: r}
+	id, n, sum, err := st.Put(ctx, src)
+	if err != nil {
+		if src.err != nil {
+			return nil, src.err
+		}
+		return nil, err
+	}
 	drop := func(err error) (*Part, error) {
-		s.deleteBlobsNow([]PartRef{{Blob: id}})
+		s.deleteBlobsNow([]PartRef{{Blob: id, Store: b.Backend}})
 		return nil, err
 	}
 	if size >= 0 && n != size {
@@ -75,7 +103,7 @@ func (s *Service) UploadPart(ctx context.Context, bucket, key, uploadID string, 
 	if contentMD5 != nil && !bytes.Equal(contentMD5, sum) {
 		return drop(ErrBadDigest)
 	}
-	p := &Part{Number: num, Size: n, ETag: hex.EncodeToString(sum), Blob: id, ModTime: time.Now().UTC()}
+	p := &Part{Number: num, Size: n, ETag: hex.EncodeToString(sum), Blob: id, Store: b.Backend, ModTime: time.Now().UTC()}
 
 	unlock := s.lockKey(uploadID, fmt.Sprint(num))
 	defer unlock()
@@ -89,7 +117,7 @@ func (s *Service) UploadPart(ctx context.Context, bucket, key, uploadID string, 
 		batch.Close()
 		return drop(err)
 	} else if ok {
-		s.enqueueGC(batch, &Object{Parts: []PartRef{{Blob: old.Blob, Size: old.Size}}})
+		s.enqueueGC(batch, &Object{Parts: []PartRef{old.ref()}})
 	}
 	setJSON(batch, partKey(uploadID, num), p)
 	if err := s.commit(batch); err != nil {
@@ -114,6 +142,17 @@ func (s *Service) parts(uploadID string) ([]*Part, error) {
 
 // ListParts returns parts with number greater than marker.
 func (s *Service) ListParts(ctx context.Context, bucket, key, uploadID string, marker, max int) (parts []*Part, truncated bool, err error) {
+	b, err := s.GetBucket(ctx, bucket)
+	if err != nil {
+		return nil, false, err
+	}
+	if b.Mirror() {
+		rem, err := s.mirror(b)
+		if err != nil {
+			return nil, false, err
+		}
+		return rem.ListParts(ctx, key, uploadID, marker, clampMax(max))
+	}
 	if _, err := s.GetUpload(ctx, bucket, key, uploadID); err != nil {
 		return nil, false, err
 	}
@@ -140,6 +179,11 @@ type CompletePart struct {
 }
 
 func (s *Service) CompleteUpload(ctx context.Context, bucket, key, uploadID string, want []CompletePart) (*Object, error) {
+	if b, err := s.GetBucket(ctx, bucket); err != nil {
+		return nil, err
+	} else if b.Mirror() {
+		return s.mirrorComplete(ctx, b, key, uploadID, want)
+	}
 	u, err := s.GetUpload(ctx, bucket, key, uploadID)
 	if err != nil {
 		return nil, err
@@ -174,7 +218,7 @@ func (s *Service) CompleteUpload(ctx context.Context, bucket, key, uploadID stri
 		}
 		raw, _ := hex.DecodeString(p.ETag)
 		digests.Write(raw)
-		o.Parts = append(o.Parts, PartRef{Blob: p.Blob, Size: p.Size})
+		o.Parts = append(o.Parts, p.ref())
 		o.Size += p.Size
 		used[p.Number] = true
 	}
@@ -185,7 +229,7 @@ func (s *Service) CompleteUpload(ctx context.Context, bucket, key, uploadID stri
 		for _, p := range have {
 			b.Delete(partKey(uploadID, p.Number), nil)
 			if !used[p.Number] {
-				s.enqueueGC(b, &Object{Parts: []PartRef{{Blob: p.Blob, Size: p.Size}}})
+				s.enqueueGC(b, &Object{Parts: []PartRef{p.ref()}})
 			}
 		}
 	}})
@@ -196,6 +240,15 @@ func (s *Service) CompleteUpload(ctx context.Context, bucket, key, uploadID stri
 }
 
 func (s *Service) AbortUpload(ctx context.Context, bucket, key, uploadID string) error {
+	if b, err := s.GetBucket(ctx, bucket); err != nil {
+		return err
+	} else if b.Mirror() {
+		rem, err := s.mirror(b)
+		if err != nil {
+			return err
+		}
+		return rem.AbortUpload(ctx, key, uploadID)
+	}
 	u, err := s.GetUpload(ctx, bucket, key, uploadID)
 	if err != nil {
 		return err
@@ -212,7 +265,7 @@ func (s *Service) abortUpload(u *Upload) error {
 	batch.Delete(uploadKey(u.Bucket, u.Key, u.ID), nil)
 	for _, p := range parts {
 		batch.Delete(partKey(u.ID, p.Number), nil)
-		s.enqueueGC(batch, &Object{Parts: []PartRef{{Blob: p.Blob, Size: p.Size}}})
+		s.enqueueGC(batch, &Object{Parts: []PartRef{p.ref()}})
 	}
 	if err := s.commit(batch); err != nil {
 		return err
@@ -242,8 +295,20 @@ func (s *Service) scanUploads(bucket, prefix, keyMarker, uploadIDMarker string, 
 
 // ListUploads lists in-progress multipart uploads.
 func (s *Service) ListUploads(ctx context.Context, bucket, prefix, keyMarker, uploadIDMarker string, max int) (uploads []*Upload, truncated bool, err error) {
-	if _, err := s.GetBucket(ctx, bucket); err != nil {
+	b, err := s.GetBucket(ctx, bucket)
+	if err != nil {
 		return nil, false, err
+	}
+	if b.Mirror() {
+		rem, err := s.mirror(b)
+		if err != nil {
+			return nil, false, err
+		}
+		ups, trunc, err := rem.ListUploads(ctx, prefix, keyMarker, uploadIDMarker, clampMax(max))
+		for _, u := range ups {
+			u.Bucket = bucket
+		}
+		return ups, trunc, err
 	}
 	max = clampMax(max)
 	err = s.scanUploads(bucket, prefix, keyMarker, uploadIDMarker, func(u *Upload) bool {

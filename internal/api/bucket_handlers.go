@@ -43,6 +43,11 @@ func (s *Server) handleListBuckets(w http.ResponseWriter, r *http.Request) {
 type createBucketRequest struct {
 	Name       string `json:"name"`
 	Versioning bool   `json:"versioning"`
+	// Backend is a storage backend ID ("" = built-in disk).
+	Backend string `json:"backend"`
+	// Mode is "" (store data) or "mirror" (live view of a remote bucket).
+	Mode         string `json:"mode"`
+	RemotePrefix string `json:"remotePrefix"`
 }
 
 func (s *Server) handleCreateBucket(w http.ResponseWriter, r *http.Request) {
@@ -53,12 +58,17 @@ func (s *Server) handleCreateBucket(w http.ResponseWriter, r *http.Request) {
 	if !can(w, r, auth.ActManageBuckets, req.Name) {
 		return
 	}
-	b, err := s.objects.CreateBucket(r.Context(), req.Name)
+	if req.Backend != "" && !can(w, r, auth.ActAdmin, "") {
+		return
+	}
+	b, err := s.objects.CreateBucket(r.Context(), req.Name, object.BucketOptions{
+		Backend: req.Backend, Mode: req.Mode, RemotePrefix: req.RemotePrefix,
+	})
 	if err != nil {
 		writeError(w, r, err)
 		return
 	}
-	if req.Versioning {
+	if req.Versioning && !b.Mirror() {
 		if b, err = s.objects.UpdateBucket(r.Context(), b.Name, func(b *object.Bucket) error {
 			b.Versioning = object.VersioningEnabled
 			return nil
@@ -67,7 +77,8 @@ func (s *Server) handleCreateBucket(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	s.audit.Record(r.Context(), principal(r).Name(), "bucket.create", b.Name, clientIP(r), nil)
+	s.audit.Record(r.Context(), principal(r).Name(), "bucket.create", b.Name, clientIP(r),
+		map[string]any{"backend": b.Backend, "mode": b.Mode, "remotePrefix": b.RemotePrefix})
 	bj, _ := s.bucketWithStats(r, b)
 	writeJSON(w, http.StatusCreated, bj)
 }

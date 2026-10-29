@@ -35,6 +35,7 @@ Most self-hosted S3 servers give you a fast storage engine and leave everything 
 - 🪣 **A real S3 server**: its own storage engine with versioning, multipart uploads, lifecycle rules and quotas. Works with the AWS CLI, rclone, boto3 and every S3 SDK.
 - 🖥️ **A complete admin panel in the open-source build**, not an upsell: file browser, previews, users, roles, access keys, webhooks, audit log.
 - 🔗 **Sharing built in**: public links with passwords, expiry and download limits, plus **file requests** that let anyone upload to you without seeing anything else.
+- 💾 **Storage anywhere**: keep each bucket on the built-in disk, on an **attached drive**, or on an **S3 provider** (ArvanCloud, ParsPack, AWS, MinIO…). You can also **mirror** an existing remote bucket and manage it from ACS with its real file names.
 - 🔌 **Made to integrate**: a documented REST API (OpenAPI 3.1), signed webhooks and Prometheus metrics.
 - 📦 **Tiny and simple**: a single static Go binary with the panel embedded. The image is about 36 MB, built `FROM scratch`. `docker compose up -d` and you're done.
 
@@ -130,6 +131,29 @@ Versioning, public read access, quotas, lifecycle rules and CORS, all from the p
 </td>
 </tr>
 </table>
+
+## 💾 Storage backends: drives & cloud gateway
+
+Every bucket chooses where its data lives. Add storage under **Storage** in the panel (admins):
+
+| Backend | What it's for |
+|---|---|
+| **Built-in disk** | The default: the `acs-data` volume. |
+| **Attached drive** | Any directory on a mounted disk or NAS. Put big or cold buckets on a second disk. Each drive gets a marker file, so the wrong disk can't be attached by mistake, and the panel shows its free space and health. |
+| **S3 provider, store mode** | ACS keeps the metadata and stores the data on the provider. Every ACS feature still works (versioning, quotas, lifecycle, share links), and the provider is just capacity. |
+| **S3 provider, mirror mode** | The bucket is a **live view** of `provider-bucket/prefix`. Files keep their real names, existing files appear immediately, and anything uploaded through ACS (panel, S3 API, share links) is visible in the provider's own panel and tools. |
+
+Provider presets are included for **ArvanCloud** (Simin `ir-thr-at1` and Shahriar `ir-tbz-sh1`), **ParsPack**, **Amazon S3** and **MinIO**, or any other S3-compatible service. ACS always works inside one existing bucket under an optional prefix, so providers that only give you a single pre-created bucket (like ParsPack) work fine. Requests are retried when a provider rate-limits (HTTP 429).
+
+```yaml
+# docker-compose.yml: attach a drive, then add /drives/disk2 under Storage
+    volumes:
+      - acs-data:/data
+      - /mnt/disk2:/drives/disk2   # sudo chown -R 65532:65532 /mnt/disk2
+```
+
+> [!NOTE]
+> Deleting a mirror bucket only removes the mapping; files at the provider are never touched. Versioning, quotas and lifecycle rules for mirror buckets are managed at the provider.
 
 <details>
 <summary><b>Full feature list</b></summary>
@@ -344,8 +368,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the code layout and guidelines.
 - [x] S3-compatible API, tested with AWS CLI, boto3 and rclone
 - [x] Web panel, share links, file requests, scoped access keys
 - [x] REST API, signed webhooks, audit log, Prometheus metrics
+- [x] Attached drives and S3 providers as storage (store and mirror modes)
+- [ ] Move a bucket between storage backends
 - [ ] Server-side encryption at rest
-- [ ] Multiple data disks and erasure coding on a single node
+- [ ] Erasure coding across drives on a single node
 - [ ] Image thumbnails and on-the-fly transforms
 - [ ] S3 bucket policies
 - [ ] OIDC single sign-on

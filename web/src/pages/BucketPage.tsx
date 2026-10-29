@@ -1,6 +1,6 @@
 import { Link, useParams, useSearchParams } from "react-router";
 import { useQuery } from "@tanstack/react-query";
-import { getBucket } from "../lib/api";
+import { getBucket, listStorage } from "../lib/api";
 import { formatBytes, plural } from "../lib/format";
 import { useCan } from "../lib/session";
 import { FileBrowser } from "../components/FileBrowser";
@@ -17,6 +17,8 @@ export function BucketPage() {
   const tab = search.get("tab") === "settings" ? "settings" : "files";
   const can = useCan();
   const bucket = useQuery({ queryKey: ["bucket", name], queryFn: () => getBucket(name) });
+  const storage = useQuery({ queryKey: ["storage"], queryFn: listStorage, enabled: can.admin && !!bucket.data?.backend });
+  const backendName = storage.data?.backends.find((x) => x.id === bucket.data?.backend)?.name;
 
   if (bucket.isPending)
     return (
@@ -48,10 +50,18 @@ export function BucketPage() {
             {b.name}
             {b.versioning === "Enabled" && <Badge tone="accent">Versioned</Badge>}
             {b.public && <Badge tone="amber">Public</Badge>}
+            {b.mode === "mirror" && <Badge tone="accent">Mirror</Badge>}
           </h1>
           <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-            {plural(b.stats.objects, "object")} · {formatBytes(b.stats.storedBytes)}
-            {b.quotaBytes ? ` of ${formatBytes(b.quotaBytes)}` : ""}
+            {b.mode === "mirror" ? (
+              <>Live view of {backendName ?? "an S3 provider"}{b.remotePrefix ? ` · ${b.remotePrefix}` : ""}</>
+            ) : (
+              <>
+                {plural(b.stats.objects, "object")} · {formatBytes(b.stats.storedBytes)}
+                {b.quotaBytes ? ` of ${formatBytes(b.quotaBytes)}` : ""}
+                {b.backend && ` · on ${backendName ?? "external storage"}`}
+              </>
+            )}
           </p>
         </div>
         {can.manageBuckets && (

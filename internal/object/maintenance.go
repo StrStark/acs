@@ -2,6 +2,7 @@ package object
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"strings"
 	"time"
@@ -31,17 +32,18 @@ func (s *Service) runGC(ctx context.Context) {
 // collectGarbage deletes blobs enqueued before cutoff and returns how many.
 func (s *Service) collectGarbage(cutoff time.Time) (int, error) {
 	type item struct {
-		key  []byte
-		blob string
+		key   []byte
+		blob  string
+		store string
 	}
 	var due []item
 	p := gcPrefix()
 	err := s.scan(p, prefixEnd(p), func(key, val []byte) (bool, error) {
-		ts, err := time.Parse(time.RFC3339, string(val))
-		if err == nil && ts.After(cutoff) {
+		e := parseGCEntry(val)
+		if e.Time.After(cutoff) {
 			return true, nil
 		}
-		due = append(due, item{append([]byte(nil), key...), string(key[len(p):])})
+		due = append(due, item{append([]byte(nil), key...), string(key[len(p):]), e.Store})
 		return len(due) < 10_000, nil
 	})
 	if err != nil {
@@ -50,15 +52,38 @@ func (s *Service) collectGarbage(cutoff time.Time) (int, error) {
 	if len(due) == 0 {
 		return 0, nil
 	}
+	ctx := context.Background()
 	batch := s.db.NewBatch()
+	n := 0
 	for _, it := range due {
-		if err := s.blobs.Delete(it.blob); err != nil {
-			slog.Warn("gc: delete blob", "blob", it.blob, "err", err)
+		st, err := s.store(it.store)
+		if err == nil {
+			err = st.Delete(ctx, it.blob)
+		}
+		if err != nil {
+			// Keep the entry; an unreachable backend is retried next run.
+			slog.Warn("gc: delete blob", "blob", it.blob, "store", it.store, "err", err)
 			continue
 		}
 		batch.Delete(it.key, nil)
+		n++
 	}
-	return len(due), s.commit(batch)
+	return n, s.commit(batch)
+}
+
+// parseGCEntry decodes a G value. Entries written before backends existed
+// are a bare RFC 3339 timestamp for the built-in store.
+func parseGCEntry(val []byte) gcEntry {
+	var e gcEntry
+	if len(val) > 0 && val[0] == '{' {
+		if json.Unmarshal(val, &e) == nil {
+			return e
+		}
+	}
+	if t, err := time.Parse(time.RFC3339, string(val)); err == nil {
+		e.Time = t
+	}
+	return e
 }
 
 func (s *Service) runScrubber(ctx context.Context) {
@@ -79,16 +104,13 @@ func (s *Service) runScrubber(ctx context.Context) {
 	}
 }
 
-// RemoveOrphans deletes blob files that no metadata references and that were
-// written before cutoff (younger blobs may belong to in-flight uploads). Such
-// orphans only appear after a crash between writing data and committing it.
+// RemoveOrphans deletes blobs that no metadata references and that were
+// written before cutoff (younger blobs may belong to in-flight uploads), in
+// every store. Such orphans only appear after a crash between writing data
+// and committing it.
 func (s *Service) RemoveOrphans(cutoff time.Time) (int, error) {
-	refs := make(map[string]struct{})
-	addParts := func(parts []PartRef) {
-		for _, p := range parts {
-			refs[p.Blob] = struct{}{}
-		}
-	}
+	refs := make(map[string]struct{}) // "<store>/<blob>"
+	ref := func(store, blob string) { refs[store+"/"+blob] = struct{}{} }
 	for _, p := range [][]byte{k("V", ""), k("P", "")} {
 		err := s.scan(p, prefixEnd(p), func(key, val []byte) (bool, error) {
 			if key[0] == 'V' {
@@ -96,13 +118,15 @@ func (s *Service) RemoveOrphans(cutoff time.Time) (int, error) {
 				if err := jsonUnmarshal(val, &o); err != nil {
 					return false, err
 				}
-				addParts(o.Parts)
+				for _, pr := range o.Parts {
+					ref(pr.Store, pr.Blob)
+				}
 			} else {
 				var part Part
 				if err := jsonUnmarshal(val, &part); err != nil {
 					return false, err
 				}
-				refs[part.Blob] = struct{}{}
+				ref(part.Store, part.Blob)
 			}
 			return true, nil
 		})
@@ -111,25 +135,40 @@ func (s *Service) RemoveOrphans(cutoff time.Time) (int, error) {
 		}
 	}
 	gp := gcPrefix()
-	if err := s.scan(gp, prefixEnd(gp), func(key, _ []byte) (bool, error) {
-		refs[string(key[len(gp):])] = struct{}{}
+	if err := s.scan(gp, prefixEnd(gp), func(key, val []byte) (bool, error) {
+		ref(parseGCEntry(val).Store, string(key[len(gp):]))
 		return true, nil
 	}); err != nil {
 		return 0, err
 	}
 
+	stores := []string{""}
+	if s.backends != nil {
+		stores = append(stores, s.backends.StoreIDs()...)
+	}
+	ctx := context.Background()
 	n := 0
-	err := s.blobs.Walk(func(id string, modTime time.Time) error {
-		if _, ok := refs[id]; ok || modTime.After(cutoff) {
+	for _, id := range stores {
+		st, err := s.store(id)
+		if err != nil {
+			slog.Warn("orphan scrub: store unavailable", "store", id, "err", err)
+			continue
+		}
+		err = st.Walk(ctx, func(blobID string, modTime time.Time) error {
+			if _, ok := refs[id+"/"+blobID]; ok || modTime.After(cutoff) {
+				return nil
+			}
+			if err := st.Delete(ctx, blobID); err != nil {
+				return err
+			}
+			n++
 			return nil
+		})
+		if err != nil {
+			slog.Warn("orphan scrub failed", "store", id, "err", err)
 		}
-		if err := s.blobs.Delete(id); err != nil {
-			return err
-		}
-		n++
-		return nil
-	})
-	return n, err
+	}
+	return n, nil
 }
 
 func (s *Service) runLifecycle(ctx context.Context) {
@@ -156,6 +195,9 @@ func (s *Service) ApplyLifecycle(ctx context.Context, now time.Time) error {
 		return err
 	}
 	for _, b := range buckets {
+		if b.Mirror() {
+			continue
+		}
 		for _, r := range b.Lifecycle {
 			if !r.Enabled {
 				continue

@@ -83,6 +83,10 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, object.ErrBucketExists), errors.Is(err, object.ErrBucketNotEmpty),
 		errors.Is(err, auth.ErrUserExists), errors.Is(err, auth.ErrLastAdmin):
 		writeProblem(w, http.StatusConflict, err.Error())
+	case errors.Is(err, object.ErrUnsupported):
+		writeProblem(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, object.ErrBackend):
+		writeProblem(w, http.StatusBadGateway, err.Error())
 	case errors.Is(err, object.ErrQuotaExceeded):
 		writeProblem(w, http.StatusInsufficientStorage, err.Error())
 	case errors.Is(err, auth.ErrWrongPasswd):

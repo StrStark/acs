@@ -23,6 +23,7 @@ import (
 	"acs/internal/secret"
 	"acs/internal/settings"
 	"acs/internal/share"
+	"acs/internal/storage"
 	"acs/internal/webhook"
 )
 
@@ -48,11 +49,16 @@ func newHarness(t *testing.T) *harness {
 	}
 	t.Cleanup(func() { objects.Close() })
 	st, _ := settings.Open(ctx, database)
+	backends, err := storage.Open(ctx, database, box, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	objects.SetBackends(backends)
 	hooks, _ := webhook.New(ctx, database, box)
 	s := NewServer(Deps{
 		Config: config.Config{DataDir: dir, SessionTTL: time.Hour, S3Listen: ":9000"},
 		DB:     database, Auth: authSvc, Objects: objects, Shares: share.New(database, box.DeriveKey("x")),
-		Webhooks: hooks, Audit: audit.New(database), Settings: st, Metrics: metrics.New(),
+		Webhooks: hooks, Audit: audit.New(database), Settings: st, Metrics: metrics.New(), Storage: backends,
 	})
 	srv := httptest.NewServer(s.Handler(http.NotFoundHandler()))
 	t.Cleanup(srv.Close)

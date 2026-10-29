@@ -190,6 +190,12 @@ func (s *Server) handleObjectInfo(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
+	if o.Tags == nil {
+		// Mirror buckets load tags separately from the provider.
+		if tags, err := s.objects.ObjectTags(r.Context(), bucket, key, r.URL.Query().Get("versionId")); err == nil {
+			o.Tags = tags
+		}
+	}
 	writeJSON(w, http.StatusOK, toObjectJSON(o, true))
 }
 

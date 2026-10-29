@@ -98,6 +98,9 @@ components:
         quotaObjects: { type: integer }
         lifecycle: { type: array, items: { $ref: "#/components/schemas/LifecycleRule" } }
         cors: { type: array, items: { $ref: "#/components/schemas/CORSRule" } }
+        backend: { type: string, description: Storage backend id; absent = built-in disk }
+        mode: { type: string, enum: ["", mirror] }
+        remotePrefix: { type: string }
         stats: { $ref: "#/components/schemas/Stats" }
     Object:
       type: object
@@ -241,7 +244,16 @@ paths:
     post:
       summary: Create bucket
       requestBody:
-        content: { application/json: { schema: { type: object, properties: { name: { type: string }, versioning: { type: boolean } } } } }
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                versioning: { type: boolean }
+                backend: { type: string, description: Storage backend id (admin only); omit for the built-in disk }
+                mode: { type: string, enum: ["", mirror], description: '"mirror" = live view of a remote S3 bucket/prefix (S3 backends only)' }
+                remotePrefix: { type: string, description: Folder inside the backend for mirror buckets }
       responses: { "201": { description: Created }, "409": { $ref: "#/components/responses/Problem" } }
   /buckets/{bucket}:
     parameters: [{ $ref: "#/components/parameters/bucket" }]
@@ -475,6 +487,43 @@ paths:
       parameters: [{ name: token, in: path, required: true, schema: { type: string } }, { name: name, in: path, required: true, schema: { type: string } }]
       requestBody: { content: { application/octet-stream: { schema: { type: string, format: binary } } } }
       responses: { "201": { description: Created }, "413": { description: Too large } }
+
+  /storage:
+    get:
+      summary: Storage backends (built-in disk, attached drives, S3 providers) with status and usage
+      responses: { "200": { description: OK } }
+    post:
+      summary: Add a storage backend (admin). S3 backends are connection-tested before saving.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, type]
+              properties:
+                name: { type: string }
+                type: { type: string, enum: [local, s3] }
+                path: { type: string, description: "Drive: absolute path inside the container" }
+                provider: { type: string, description: "Preset id (arvan-simin, arvan-shahriar, parspack, aws, minio, other)" }
+                endpoint: { type: string }
+                region: { type: string }
+                bucket: { type: string, description: Existing bucket at the provider }
+                prefix: { type: string }
+                accessKey: { type: string }
+                secretKey: { type: string }
+                pathStyle: { type: boolean }
+                insecureTls: { type: boolean }
+      responses: { "201": { description: Created }, "422": { $ref: "#/components/responses/Problem" } }
+  /storage/test:
+    post:
+      summary: Test a backend configuration without saving it (admin)
+      responses: { "200": { description: "{ ok, error }" } }
+  /storage/{id}:
+    parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+    patch: { summary: "Update name, endpoint or credentials (admin); empty secretKey keeps the current one", responses: { "200": { description: OK } } }
+    delete: { summary: Remove a backend no bucket uses (data is left in place), responses: { "204": { $ref: "#/components/responses/NoContent" }, "409": { $ref: "#/components/responses/Problem" } } }
+  /storage/{id}/check:
+    post: { summary: Re-check a backend's health, parameters: [{ name: id, in: path, required: true, schema: { type: string } }], responses: { "200": { description: OK } } }
 
   /settings:
     get: { summary: Server settings and effective S3 endpoint, responses: { "200": { description: OK } } }

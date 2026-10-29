@@ -2,11 +2,9 @@ package object
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
-	"os"
-
-	"acs/internal/blob"
 )
 
 type ReadSeekCloser interface {
@@ -14,73 +12,71 @@ type ReadSeekCloser interface {
 	io.Closer
 }
 
-// reader presents an object's inline data or blob parts as one seekable stream.
-// Part files are opened lazily, so a reader holds at most one descriptor.
-type reader struct {
-	blobs *blob.Store
-	o     *Object
-	inl   *bytes.Reader
-	pos   int64
-	// open part
-	idx  int
-	f    *os.File
-	fOff int64 // offset of part idx within the object
+// segment is a contiguous slice of an object's data that can be streamed
+// from any offset (a blob in some store, or a mirrored remote object).
+type segment struct {
+	size int64
+	open func(offset int64) (io.ReadCloser, error)
 }
 
-func newReader(blobs *blob.Store, o *Object) *reader {
-	r := &reader{blobs: blobs, o: o, idx: -1}
-	if len(o.Parts) == 0 {
-		r.inl = bytes.NewReader(o.Inline)
-	}
-	return r
+// reader presents an object's segments as one seekable stream. Streams are
+// opened lazily and reopened after a seek, so Seek itself does no I/O (which
+// http.ServeContent relies on to learn the size).
+type reader struct {
+	inl  *bytes.Reader
+	segs []segment
+	size int64
+	pos  int64
+
+	cur    io.ReadCloser
+	curPos int64 // object offset the open stream will read next
 }
 
 func (r *reader) Read(p []byte) (int, error) {
 	if r.inl != nil {
 		return r.inl.Read(p)
 	}
-	if r.pos >= r.o.Size {
+	if r.pos >= r.size {
 		return 0, io.EOF
 	}
-	if err := r.ensurePart(); err != nil {
-		return 0, err
+	if r.cur == nil || r.curPos != r.pos {
+		if err := r.openAt(r.pos); err != nil {
+			return 0, err
+		}
 	}
-	part := r.o.Parts[r.idx]
-	remaining := part.Size - (r.pos - r.fOff)
-	if int64(len(p)) > remaining {
-		p = p[:remaining]
-	}
-	n, err := r.f.ReadAt(p, r.pos-r.fOff)
+	n, err := r.cur.Read(p)
 	r.pos += int64(n)
-	if errors.Is(err, io.EOF) && int64(n) == remaining {
-		err = nil
-	}
-	if err == nil && n == 0 {
-		err = io.ErrUnexpectedEOF
+	r.curPos = r.pos
+	if errors.Is(err, io.EOF) {
+		// End of this segment; the next Read opens the following one.
+		r.cur.Close()
+		r.cur = nil
+		if r.pos < r.size {
+			err = nil
+			if n == 0 {
+				return r.Read(p)
+			}
+		}
 	}
 	return n, err
 }
 
-// ensurePart opens the part containing r.pos.
-func (r *reader) ensurePart() error {
-	if r.f != nil && r.pos >= r.fOff && r.pos < r.fOff+r.o.Parts[r.idx].Size {
-		return nil
-	}
-	if r.f != nil {
-		r.f.Close()
-		r.f = nil
+func (r *reader) openAt(pos int64) error {
+	if r.cur != nil {
+		r.cur.Close()
+		r.cur = nil
 	}
 	var off int64
-	for i, p := range r.o.Parts {
-		if r.pos < off+p.Size {
-			f, err := r.blobs.Open(p.Blob)
+	for _, sg := range r.segs {
+		if pos < off+sg.size {
+			rc, err := sg.open(pos - off)
 			if err != nil {
 				return err
 			}
-			r.f, r.idx, r.fOff = f, i, off
+			r.cur, r.curPos = rc, pos
 			return nil
 		}
-		off += p.Size
+		off += sg.size
 	}
 	return io.EOF
 }
@@ -96,7 +92,7 @@ func (r *reader) Seek(offset int64, whence int) (int64, error) {
 	case io.SeekCurrent:
 		abs = r.pos + offset
 	case io.SeekEnd:
-		abs = r.o.Size + offset
+		abs = r.size + offset
 	default:
 		return 0, errors.New("invalid whence")
 	}
@@ -108,10 +104,36 @@ func (r *reader) Seek(offset int64, whence int) (int64, error) {
 }
 
 func (r *reader) Close() error {
-	if r.f != nil {
-		err := r.f.Close()
-		r.f = nil
+	if r.cur != nil {
+		err := r.cur.Close()
+		r.cur = nil
 		return err
 	}
 	return nil
+}
+
+// Open returns a reader over the object's data.
+func (s *Service) Open(o *Object) ReadSeekCloser {
+	ctx := context.Background()
+	if o.remote != nil {
+		rem, key := o.remote, o.Key
+		return &reader{size: o.Size, segs: []segment{{size: o.Size, open: func(off int64) (io.ReadCloser, error) {
+			return rem.Get(ctx, key, off)
+		}}}}
+	}
+	if len(o.Parts) == 0 {
+		return &reader{inl: bytes.NewReader(o.Inline)}
+	}
+	r := &reader{size: o.Size}
+	for _, p := range o.Parts {
+		p := p
+		r.segs = append(r.segs, segment{size: p.Size, open: func(off int64) (io.ReadCloser, error) {
+			st, err := s.store(p.Store)
+			if err != nil {
+				return nil, err
+			}
+			return st.Open(ctx, p.Blob, off)
+		}})
+	}
+	return r
 }

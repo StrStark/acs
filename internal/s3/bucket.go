@@ -39,7 +39,7 @@ func (s *Server) createBucket(q *request) {
 	if body, _, e := q.auth.bodyReader(q.r); e == nil {
 		io.Copy(io.Discard, io.LimitReader(body, 1<<20))
 	}
-	if _, err := s.objects.CreateBucket(q.r.Context(), q.bucket); err != nil {
+	if _, err := s.objects.CreateBucket(q.r.Context(), q.bucket, object.BucketOptions{}); err != nil {
 		s.writeError(q, fromObjectErr(err))
 		return
 	}

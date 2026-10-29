@@ -12,6 +12,8 @@ RUN npm run build
 # Cross-compile on the build platform; no emulation needed for multi-arch images.
 FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS server
 WORKDIR /src
+# "|" falls through to the next proxy on any error (e.g. a regional 403).
+ARG GOPROXY=https://proxy.golang.org|https://goproxy.io|direct
 COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd/ cmd/

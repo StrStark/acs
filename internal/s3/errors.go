@@ -87,6 +87,10 @@ func fromObjectErr(err error) *Error {
 		return newErr(http.StatusBadRequest, "IncompleteBody", "You did not provide the number of bytes specified by the Content-Length HTTP header.")
 	case errors.Is(err, object.ErrQuotaExceeded):
 		return newErr(http.StatusForbidden, "QuotaExceeded", "The bucket quota has been exceeded.")
+	case errors.Is(err, object.ErrUnsupported):
+		return newErr(http.StatusNotImplemented, "NotImplemented", err.Error())
+	case errors.Is(err, object.ErrBackend):
+		return newErr(http.StatusServiceUnavailable, "ServiceUnavailable", err.Error())
 	case errors.Is(err, object.ErrInvalidArgument):
 		return newErr(http.StatusBadRequest, "InvalidArgument", err.Error())
 	}
