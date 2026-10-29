@@ -14,12 +14,14 @@ import (
 	"testing"
 	"time"
 
+	"acs/internal/alerts"
 	"acs/internal/audit"
 	"acs/internal/auth"
 	"acs/internal/config"
 	"acs/internal/db"
 	"acs/internal/metrics"
 	"acs/internal/object"
+	"acs/internal/replica"
 	"acs/internal/secret"
 	"acs/internal/settings"
 	"acs/internal/share"
@@ -59,6 +61,12 @@ func newHarness(t *testing.T) *harness {
 		Config: config.Config{DataDir: dir, SessionTTL: time.Hour, S3Listen: ":9000"},
 		DB:     database, Auth: authSvc, Objects: objects, Shares: share.New(database, box.DeriveKey("x")),
 		Webhooks: hooks, Audit: audit.New(database), Settings: st, Metrics: metrics.New(), Storage: backends,
+		Recovery: &Recovery{
+			Replicator: replica.New(replica.Options{Objects: objects, DB: database, DataDir: dir, Installation: "inst_test",
+				SiteName: func() string { return "test" }, Keyring: func() []byte { return nil }}),
+			Alerts: alerts.New(database, hooks), Box: box, Installation: "inst_test", Restart: func() {},
+			Checker: alerts.NewChecker(objects, alerts.New(database, hooks), func(s string) string { return s }),
+		},
 	})
 	srv := httptest.NewServer(s.Handler(http.NotFoundHandler()))
 	t.Cleanup(srv.Close)

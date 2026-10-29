@@ -1,17 +1,23 @@
 import { useState, type FormEvent } from "react";
-import { Navigate } from "react-router";
+import { Link, Navigate } from "react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Cloud, HardDrive, Pencil, Plus, RefreshCw, Server, Trash2 } from "lucide-react";
+import { Cloud, CloudCheck, CloudAlert, HardDrive, Import, Link2, Pencil, Plus, RefreshCw, ScanSearch, Server, Trash2 } from "lucide-react";
 import {
   ApiError,
   checkStorage,
   createStorage,
   deleteStorage,
+  discoverStorage,
+  importDrive,
   listStorage,
   testStorage,
   updateStorage,
   type BackendInput,
   type BackendStatus,
+  type DiscoveredDrive,
+  type ExistingACS,
+  type ImportResult,
+  type ReplicaStatus,
   type StorageBackend,
 } from "../lib/api";
 import { formatBytes, plural, timeAgo } from "../lib/format";
@@ -43,7 +49,12 @@ export function StoragePage() {
   const [editing, setEditing] = useState<StorageBackend | null>(null);
   const [deleting, setDeleting] = useState<StorageBackend | null>(null);
   const list = useQuery({ queryKey: ["storage"], queryFn: listStorage, enabled: can.admin });
-  const refresh = () => queryClient.invalidateQueries({ queryKey: ["storage"] });
+  const refresh = () => {
+    queryClient.invalidateQueries({ queryKey: ["storage"] });
+    queryClient.invalidateQueries({ queryKey: ["storage-discover"] });
+    queryClient.invalidateQueries({ queryKey: ["buckets"] });
+    queryClient.invalidateQueries({ queryKey: ["alert-summary"] });
+  };
 
   const check = useMutation({
     mutationFn: (b: StorageBackend) => checkStorage(b.id),
@@ -85,6 +96,7 @@ export function StoragePage() {
             status={d.builtin.status}
             buckets={d.builtinBuckets}
             stored={d.builtinStoredBytes}
+            replica={d.builtinReplica}
           />
           {d.backends.map((b) => (
             <BackendCard
@@ -96,6 +108,7 @@ export function StoragePage() {
               status={b.status}
               buckets={b.buckets}
               stored={b.storedBytes}
+              replica={b.replica}
               actions={
                 <Menu
                   items={[
@@ -122,6 +135,21 @@ export function StoragePage() {
           )}
         </div>
       )}
+      {d && (
+        <p className="mt-3 text-xs text-zinc-500">
+          Each storage location keeps a copy of ACS's metadata, so any one of them can rebuild this server on a new machine.
+          {!d.recoveryConfigured && (
+            <>
+              {" "}
+              <Link to="/settings#recovery" className="font-medium text-amber-600 hover:underline dark:text-amber-400">
+                Set a recovery passphrase
+              </Link>{" "}
+              so the copies include access-key secrets.
+            </>
+          )}
+        </p>
+      )}
+      <DiscoverSection onDone={refresh} />
       {adding && <BackendDialog onClose={() => setAdding(false)} onDone={refresh} />}
       {editing && <BackendDialog backend={editing} onClose={() => setEditing(null)} onDone={refresh} />}
       <ConfirmDialog
@@ -146,6 +174,7 @@ function BackendCard({
   status,
   buckets,
   stored,
+  replica,
   actions,
 }: {
   icon: typeof Server;
@@ -155,6 +184,7 @@ function BackendCard({
   status: BackendStatus;
   buckets: number;
   stored: number;
+  replica?: ReplicaStatus;
   actions?: React.ReactNode;
 }) {
   const pct = status.totalBytes ? Math.round(((status.totalBytes - (status.freeBytes ?? 0)) / status.totalBytes) * 100) : null;
@@ -171,6 +201,7 @@ function BackendCard({
           {detail}
         </p>
         {!status.online && status.error && <p className="mt-1 text-xs text-red-600 dark:text-red-400">{status.error}</p>}
+        {replica && <ReplicaLine r={replica} />}
       </div>
       <div className="w-48 text-right text-sm">
         <p className="tabular-nums">
@@ -192,6 +223,128 @@ function BackendCard({
   );
 }
 
+// Go sends the zero time (year 1) before the first successful write.
+const synced = (r: ReplicaStatus) => !!r.syncedAt && new Date(r.syncedAt).getFullYear() > 2000;
+
+function ReplicaLine({ r }: { r: ReplicaStatus }) {
+  if (r.foreign) {
+    return (
+      <p className="mt-1 flex items-center gap-1.5 text-xs text-amber-600 dark:text-amber-400">
+        <CloudAlert className="size-3.5" /> Holds metadata of another installation{r.foreignSite ? ` (${r.foreignSite})` : ""}; import it below to take over
+      </p>
+    );
+  }
+  if (r.error) {
+    return (
+      <p className="mt-1 flex items-center gap-1.5 text-xs text-red-600 dark:text-red-400">
+        <CloudAlert className="size-3.5" /> Metadata copy failing: {r.error}
+      </p>
+    );
+  }
+  return (
+    <p className="mt-1 flex items-center gap-1.5 text-xs text-zinc-500">
+      <CloudCheck className="size-3.5 text-emerald-600" /> Metadata copy {synced(r) ? `synced ${timeAgo(r.syncedAt)}` : "pending"}
+    </p>
+  );
+}
+
+const driveStates: Record<DiscoveredDrive["state"], { label: string; tone: "green" | "amber" | "accent" | "neutral" }> = {
+  attached: { label: "In use", tone: "green" },
+  detached: { label: "This server's drive", tone: "accent" },
+  foreign: { label: "From another server", tone: "amber" },
+  empty: { label: "No ACS data", tone: "neutral" },
+};
+
+/** Lists drives mounted under the drives root and lets admins re-attach or import them. */
+function DiscoverSection({ onDone }: { onDone: () => void }) {
+  const toast = useToast();
+  const queryClient = useQueryClient();
+  const found = useQuery({ queryKey: ["storage-discover"], queryFn: discoverStorage });
+  const [importing, setImporting] = useState<DiscoveredDrive | null>(null);
+  const imp = useMutation({
+    mutationFn: (d: DiscoveredDrive) => importDrive({ path: d.path }),
+    onSuccess: (r) => {
+      toast(importSummary(r));
+      setImporting(null);
+      queryClient.invalidateQueries({ queryKey: ["storage-discover"] });
+      queryClient.invalidateQueries({ queryKey: ["buckets"] });
+      queryClient.invalidateQueries({ queryKey: ["alert-summary"] });
+      onDone();
+    },
+    onError: (e) => toast(e.message, "error"),
+  });
+  const list = (found.data ?? []).filter((d) => d.state !== "empty" || d.backendId);
+  return (
+    <section className="mt-10">
+      <div className="mb-3 flex items-center gap-3">
+        <div className="flex-1">
+          <h2 className="font-semibold">Drives on this machine</h2>
+          <p className="text-sm text-zinc-500 dark:text-zinc-400">
+            Drives mounted under <code>/drives</code> that hold ACS data. Moved drives are re-attached automatically.
+          </p>
+        </div>
+        <Button variant="secondary" icon={ScanSearch} loading={found.isFetching} onClick={() => found.refetch()}>
+          Scan
+        </Button>
+      </div>
+      {found.error && <Alert>{found.error.message}</Alert>}
+      {found.data && list.length === 0 && (
+        <Card className="p-4 text-sm text-zinc-500">
+          No ACS data found on mounted drives. Mount a disk ACS used before (for example <code>- /mnt:/drives:rslave</code> in docker-compose.yml) and scan again.
+        </Card>
+      )}
+      <div className="space-y-2">
+        {list.map((d) => {
+          const st = driveStates[d.state];
+          return (
+            <Card key={d.path} className="flex flex-wrap items-center gap-3 p-3">
+              <HardDrive className="size-4 shrink-0 text-zinc-400" />
+              <div className="min-w-0 flex-1">
+                <p className="flex flex-wrap items-center gap-2 text-sm font-medium">
+                  {d.backendName || "Drive"} <Badge tone={st.tone}>{st.label}</Badge>
+                </p>
+                <p className="truncate text-xs text-zinc-500">
+                  <span className="font-mono">{d.path}</span>
+                  {d.siteName && ` · ${d.siteName}`}
+                  {d.buckets && ` · ${plural(d.buckets.length, "bucket")}`}
+                  {d.updatedAt && ` · synced ${timeAgo(d.updatedAt)}`}
+                </p>
+              </div>
+              {d.state === "detached" && (
+                <Button variant="secondary" icon={Link2} loading={imp.isPending && imp.variables === d} onClick={() => imp.mutate(d)}>
+                  Re-attach
+                </Button>
+              )}
+              {d.state === "foreign" && (
+                <Button variant="secondary" icon={Import} onClick={() => setImporting(d)}>
+                  Import
+                </Button>
+              )}
+            </Card>
+          );
+        })}
+      </div>
+      <ConfirmDialog
+        open={importing !== null}
+        onClose={() => setImporting(null)}
+        onConfirm={() => importing && imp.mutate(importing)}
+        loading={imp.isPending}
+        title={`Import ${importing?.backendName ?? "drive"}?`}
+        confirmLabel="Import"
+        danger={false}
+      >
+        This drive was used by <b>{importing?.siteName}</b>. Its buckets ({importing?.buckets?.join(", ") || "none"}) are added to this server with all their files and versions,
+        and this server takes over the drive. Buckets whose names already exist here are skipped.
+      </ConfirmDialog>
+    </section>
+  );
+}
+
+const importSummary = (r: ImportResult) =>
+  r.imported.length || r.skipped.length
+    ? `Imported ${plural(r.imported.length, "bucket")}${r.skipped.length ? `; skipped ${r.skipped.join(", ")} (name already in use)` : ""}`
+    : `Attached ${r.backend.name}`;
+
 function BackendDialog({ backend, onClose, onDone }: { backend?: StorageBackend; onClose: () => void; onDone: () => void }) {
   const toast = useToast();
   const editing = !!backend;
@@ -200,24 +353,30 @@ function BackendDialog({ backend, onClose, onDone }: { backend?: StorageBackend;
       ? { ...backend, secretKey: "", prefix: backend.prefix?.replace(/\/$/, "") }
       : { name: "", type: "s3", provider: "arvan-simin", endpoint: providers[0].endpoint, pathStyle: true, region: "", bucket: "", prefix: "acs", accessKey: "", secretKey: "" },
   );
-  const [testResult, setTestResult] = useState<{ ok: boolean; error?: string }>();
+  const [testResult, setTestResult] = useState<{ ok: boolean; error?: string; existing?: ExistingACS }>();
+  const [conflict, setConflict] = useState<string>();
   const set = (p: Partial<BackendInput>) => {
     setForm((f) => ({ ...f, ...p }));
     setTestResult(undefined);
+    setConflict(undefined);
   };
   const preset = providers.find((p) => p.id === form.provider) ?? providers[providers.length - 1];
 
   const save = useMutation({
-    mutationFn: () => (editing ? updateStorage(backend!.id, form) : createStorage(form)),
-    onSuccess: (b) => {
-      toast(editing ? "Storage updated" : `Added ${b.name}`);
+    mutationFn: (importData: boolean) => (editing ? updateStorage(backend!.id, form) : createStorage({ ...form, import: importData || undefined })),
+    onSuccess: (r) => {
+      toast(editing ? "Storage updated" : "imported" in r ? importSummary(r) : `Added ${r.name}`);
       onClose();
       onDone();
+    },
+    onError: (e) => {
+      if (e instanceof ApiError && e.status === 409) setConflict(e.message);
     },
   });
   const test = useMutation({ mutationFn: () => testStorage(form), onSuccess: setTestResult });
   const fields = (save.error ?? test.error) instanceof ApiError ? ((save.error ?? test.error) as ApiError).fields : {};
-  const generalError = (save.error ?? test.error) && Object.keys(fields).length === 0 ? (save.error ?? test.error)!.message : undefined;
+  const generalError = !conflict && (save.error ?? test.error) && Object.keys(fields).length === 0 ? (save.error ?? test.error)!.message : undefined;
+  const existing = testResult?.existing;
 
   return (
     <Modal
@@ -235,9 +394,15 @@ function BackendDialog({ backend, onClose, onDone }: { backend?: StorageBackend;
           <Button variant="secondary" onClick={onClose}>
             Cancel
           </Button>
-          <Button type="submit" form="backend-form" loading={save.isPending}>
-            {editing ? "Save" : "Add storage"}
-          </Button>
+          {conflict ? (
+            <Button icon={Import} loading={save.isPending} onClick={() => save.mutate(true)}>
+              Import and add
+            </Button>
+          ) : (
+            <Button type="submit" form="backend-form" loading={save.isPending}>
+              {editing ? "Save" : "Add storage"}
+            </Button>
+          )}
         </>
       }
     >
@@ -246,11 +411,23 @@ function BackendDialog({ backend, onClose, onDone }: { backend?: StorageBackend;
         className="space-y-4"
         onSubmit={(e: FormEvent) => {
           e.preventDefault();
-          save.mutate();
+          save.mutate(false);
         }}
       >
         {generalError && <Alert>{generalError}</Alert>}
+        {conflict && (
+          <Alert tone="warning">
+            {conflict}. Importing adds its buckets and files to this server and makes this server the owner of the storage.
+          </Alert>
+        )}
         {testResult && (testResult.ok ? <Alert tone="info">Connection works: ACS could write, read and delete a test object.</Alert> : <Alert>{testResult.error}</Alert>)}
+        {existing && !conflict && (
+          <Alert tone={existing.foreign ? "warning" : "info"}>
+            {existing.foreign
+              ? `This storage holds data from another ACS server, "${existing.siteName}" (${plural(existing.buckets?.length ?? 0, "bucket")}, synced ${timeAgo(existing.updatedAt)}). You will be asked to import it.`
+              : `This storage already belongs to this server (${plural(existing.buckets?.length ?? 0, "bucket")}); its buckets reconnect as soon as it is added.`}
+          </Alert>
+        )}
 
         {!editing && (
           <div className="grid grid-cols-2 gap-2">

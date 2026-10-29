@@ -84,7 +84,7 @@ func (s *Service) writeData(ctx context.Context, backend string, r io.Reader) (*
 		}
 		return nil, err
 	}
-	return &data{parts: []PartRef{{Blob: id, Size: size, Store: backend}}, size: size, md5: sum}, nil
+	return &data{parts: []PartRef{{Blob: id, Size: size, Store: backend, Sum: hex.EncodeToString(sum)}}, size: size, md5: sum}, nil
 }
 
 func (s *Service) PutObject(ctx context.Context, bucket, key string, r io.Reader, opts PutOptions) (*Object, error) {

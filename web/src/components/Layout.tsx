@@ -2,6 +2,7 @@ import { useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  Bell,
   Database,
   HardDrive,
   KeyRound,
@@ -16,7 +17,7 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
-import { getSettings, logout, type Me } from "../lib/api";
+import { alertSummary, getSettings, logout, type Me } from "../lib/api";
 import { SessionContext } from "../lib/session";
 import { Logo, IconButton } from "./ui";
 
@@ -28,6 +29,7 @@ const nav: NavItem[] = [
   { label: "Share links", icon: Link2, to: "/shares" },
   { label: "Access keys", icon: KeyRound, to: "/keys" },
   { label: "Storage", icon: HardDrive, to: "/storage", admin: true },
+  { label: "Alerts", icon: Bell, to: "/alerts", admin: true },
   { label: "Users", icon: Users, to: "/users", admin: true },
   { label: "Webhooks", icon: Webhook, to: "/webhooks", admin: true },
   { label: "Audit log", icon: ScrollText, to: "/audit", admin: true },
@@ -40,6 +42,8 @@ export function Layout({ user }: { user: Me }) {
   const [mobileOpen, setMobileOpen] = useState(false);
   const settings = useQuery({ queryKey: ["settings"], queryFn: getSettings });
   const siteName = settings.data?.siteName ?? "ACS Storage";
+  const alerts = useQuery({ queryKey: ["alert-summary"], queryFn: alertSummary, enabled: user.role === "admin", refetchInterval: 30_000 });
+  const openAlerts = alerts.data?.open ?? 0;
   const signOut = useMutation({
     mutationFn: logout,
     onSettled: () => {
@@ -74,6 +78,11 @@ export function Layout({ user }: { user: Me }) {
             >
               <Icon className="size-4" />
               {label}
+              {to === "/alerts" && openAlerts > 0 && (
+                <span className="ml-auto rounded-full bg-red-600 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-white tabular-nums" aria-label={`${openAlerts} open`}>
+                  {openAlerts > 99 ? "99+" : openAlerts}
+                </span>
+              )}
             </NavLink>
           ))}
       </nav>

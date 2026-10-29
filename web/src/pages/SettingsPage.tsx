@@ -1,10 +1,10 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { BookOpen } from "lucide-react";
-import { ApiError, changePassword, getSettings, getSystemInfo, updateSettings, type Settings } from "../lib/api";
+import { ApiError, changePassword, getRecovery, getSettings, getSystemInfo, setRecovery, updateSettings, type Settings } from "../lib/api";
 import { formatDuration } from "../lib/format";
 import { useCan, useSession } from "../lib/session";
-import { Alert, Button, Card, CopyField, Field, PageHeader, useToast } from "../components/ui";
+import { Alert, Badge, Button, Card, CopyField, Field, PageHeader, useToast } from "../components/ui";
 
 export function SettingsPage() {
   const can = useCan();
@@ -13,6 +13,7 @@ export function SettingsPage() {
       <PageHeader title="Settings" />
       <AccountSection />
       {can.admin && <ServerSection />}
+      {can.admin && <RecoverySection />}
       <ApiSection />
     </div>
   );
@@ -115,6 +116,69 @@ function ServerSection() {
         <Button type="submit" loading={m.isPending}>
           Save settings
         </Button>
+      </form>
+    </Card>
+  );
+}
+
+function RecoverySection() {
+  const toast = useToast();
+  const queryClient = useQueryClient();
+  const status = useQuery({ queryKey: ["recovery"], queryFn: getRecovery });
+  const [passphrase, setPassphrase] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [current, setCurrent] = useState("");
+  const [mismatch, setMismatch] = useState(false);
+  const m = useMutation({
+    mutationFn: () => setRecovery({ passphrase, currentPassword: current }),
+    onSuccess: () => {
+      toast("Recovery passphrase saved to every drive and provider");
+      setPassphrase("");
+      setConfirm("");
+      setCurrent("");
+      queryClient.invalidateQueries({ queryKey: ["recovery"] });
+      queryClient.invalidateQueries({ queryKey: ["alert-summary"] });
+    },
+  });
+  const fields = m.error instanceof ApiError ? m.error.fields : {};
+  const configured = status.data?.configured;
+  useEffect(() => {
+    if (status.data && window.location.hash === "#recovery") document.getElementById("recovery")?.scrollIntoView({ behavior: "smooth" });
+  }, [status.data]);
+  return (
+    <Card className="p-5">
+      <h2 id="recovery" className="flex scroll-mt-8 items-center gap-2 font-semibold">
+        Recovery {status.data && (configured ? <Badge tone="green">Passphrase set</Badge> : <Badge tone="amber">Not set</Badge>)}
+      </h2>
+      <p className="mb-4 mt-0.5 text-sm text-zinc-500 dark:text-zinc-400">
+        ACS keeps a copy of its metadata (users, buckets, keys, settings) on every drive and S3 provider it uses, so no separate backup is needed: any one of them is enough to rebuild
+        this server on a new machine. Secrets in that copy are locked with this passphrase. Store it somewhere safe; it cannot be recovered.
+      </p>
+      <form
+        className="grid gap-4 sm:grid-cols-2"
+        onSubmit={(e: FormEvent) => {
+          e.preventDefault();
+          if (passphrase !== confirm) {
+            setMismatch(true);
+            return;
+          }
+          setMismatch(false);
+          m.mutate();
+        }}
+      >
+        {m.error && Object.keys(fields).length === 0 && (
+          <div className="sm:col-span-2">
+            <Alert>{m.error.message}</Alert>
+          </div>
+        )}
+        <Field label={configured ? "New passphrase" : "Passphrase"} type="password" value={passphrase} onChange={(e) => setPassphrase(e.target.value)} error={fields.passphrase} hint="At least 12 characters. A few random words work well." autoComplete="new-password" required />
+        <Field label="Confirm passphrase" type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)} error={mismatch ? "Passphrases do not match" : undefined} autoComplete="new-password" required />
+        <Field label="Your current password" type="password" value={current} onChange={(e) => setCurrent(e.target.value)} error={fields.currentPassword} autoComplete="current-password" required />
+        <div className="flex items-end">
+          <Button type="submit" loading={m.isPending}>
+            {configured ? "Change passphrase" : "Set passphrase"}
+          </Button>
+        </div>
       </form>
     </Card>
   );

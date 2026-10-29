@@ -160,3 +160,12 @@ func (s *Service) DeleteUser(ctx context.Context, id int64) error {
 	s.invalidateUserKeys(id)
 	return nil
 }
+
+// CheckPassword reports whether password is the user's current password.
+func (s *Service) CheckPassword(ctx context.Context, id int64, password string) (bool, error) {
+	var hash string
+	if err := s.db.QueryRowContext(ctx, `SELECT password_hash FROM users WHERE id = ?`, id).Scan(&hash); err != nil {
+		return false, err
+	}
+	return VerifyPassword(password, hash)
+}

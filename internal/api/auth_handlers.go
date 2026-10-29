@@ -13,6 +13,8 @@ const sessionCookie = "acs_session"
 type setupStatus struct {
 	NeedsSetup    bool `json:"needsSetup"`
 	TokenRequired bool `json:"tokenRequired"`
+	// Restorable lists ACS storage found on attached drives (fresh installs only).
+	Restorable []restoreCandidate `json:"restorable,omitempty"`
 }
 
 func (s *Server) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
@@ -21,7 +23,11 @@ func (s *Server) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, setupStatus{NeedsSetup: needs, TokenRequired: needs && s.auth.SetupTokenRequired()})
+	st := setupStatus{NeedsSetup: needs, TokenRequired: needs && s.auth.SetupTokenRequired()}
+	if needs {
+		st.Restorable = s.restoreCandidates()
+	}
+	writeJSON(w, http.StatusOK, st)
 }
 
 type setupRequest struct {

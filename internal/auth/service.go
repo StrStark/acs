@@ -59,6 +59,11 @@ func NewService(db *sql.DB, box *secret.Box, sessionTTL time.Duration, setupToke
 	}, nil
 }
 
+// CheckSetupToken reports whether token matches ACS_SETUP_TOKEN.
+func (s *Service) CheckSetupToken(token string) bool {
+	return s.setupToken == "" || subtle.ConstantTimeCompare([]byte(token), []byte(s.setupToken)) == 1
+}
+
 // SetupTokenRequired reports whether Setup needs a token (ACS_SETUP_TOKEN is set).
 func (s *Service) SetupTokenRequired() bool { return s.setupToken != "" }
 

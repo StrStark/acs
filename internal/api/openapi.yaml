@@ -157,7 +157,7 @@ paths:
     get:
       summary: Whether first-run setup is needed
       security: []
-      responses: { "200": { description: "{ needsSetup, tokenRequired }" } }
+      responses: { "200": { description: "{ needsSetup, tokenRequired, restorable[] } — restorable lists ACS metadata found on attached drives" } }
     post:
       summary: Create the first admin account and sign in
       security: []
@@ -169,6 +169,21 @@ paths:
               required: [username, password]
               properties: { username: { type: string }, password: { type: string }, setupToken: { type: string } }
       responses: { "201": { description: Created }, "409": { $ref: "#/components/responses/Problem" } }
+  /setup/restore:
+    post:
+      summary: Restore a fresh installation from the metadata copy on a drive or S3 provider, then restart
+      security: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                path: { type: string, description: "A drive from GET /setup restorable[]" }
+                s3: { type: object, description: "An S3 provider (same fields as POST /storage)" }
+                passphrase: { type: string, description: Recovery passphrase }
+                setupToken: { type: string }
+      responses: { "202": { description: "{ restarting, siteName, secretsRestored }" }, "409": { $ref: "#/components/responses/Problem" }, "422": { $ref: "#/components/responses/Problem" } }
 
   /auth/login:
     post:
@@ -513,11 +528,41 @@ paths:
                 secretKey: { type: string }
                 pathStyle: { type: boolean }
                 insecureTls: { type: boolean }
-      responses: { "201": { description: Created }, "422": { $ref: "#/components/responses/Problem" } }
+                import: { type: boolean, description: "Take over storage that holds another ACS installation's data, importing its buckets" }
+      responses: { "201": { description: Created }, "409": { description: The storage holds another installation's data; retry with import }, "422": { $ref: "#/components/responses/Problem" } }
   /storage/test:
     post:
       summary: Test a backend configuration without saving it (admin)
-      responses: { "200": { description: "{ ok, error }" } }
+      responses: { "200": { description: "{ ok, error, existing } — existing describes ACS data already on the storage" } }
+  /storage/discover:
+    get: { summary: "Drives under ACS_DRIVES_ROOT with ACS data: attached, detached, foreign or empty (admin)", responses: { "200": { description: OK } } }
+  /storage/import:
+    post:
+      summary: Attach a discovered drive and import its buckets (admin)
+      requestBody: { content: { application/json: { schema: { type: object, required: [path], properties: { path: { type: string }, name: { type: string } } } } } }
+      responses: { "200": { description: "{ backend, imported[], skipped[] }" } }
+  /settings/recovery:
+    get: { summary: Whether a recovery passphrase is set (admin), responses: { "200": { description: "{ configured }" } } }
+    put:
+      summary: Set the recovery passphrase that seals secrets in metadata copies (admin, panel session only)
+      requestBody: { content: { application/json: { schema: { type: object, required: [passphrase, currentPassword], properties: { passphrase: { type: string, minLength: 12 }, currentPassword: { type: string } } } } } }
+      responses: { "204": { $ref: "#/components/responses/NoContent" }, "422": { $ref: "#/components/responses/Problem" } }
+  /alerts:
+    get:
+      summary: Storage alerts (admin)
+      parameters: [{ name: state, in: query, schema: { type: string, enum: [open, resolved, all] } }]
+      responses: { "200": { description: OK } }
+  /alerts/summary:
+    get: { summary: "Open alert count, last integrity check, and whether recovery is configured (admin)", responses: { "200": { description: OK } } }
+  /alerts/check:
+    post:
+      summary: Start an integrity check now (admin)
+      requestBody: { content: { application/json: { schema: { type: object, properties: { deep: { type: boolean, description: Verify checksums } } } } } }
+      responses: { "202": { description: "{ started }" } }
+  /alerts/{id}/resolve:
+    post: { summary: Resolve an alert, parameters: [{ name: id, in: path, required: true, schema: { type: integer } }], responses: { "204": { $ref: "#/components/responses/NoContent" } } }
+  /alerts/resolve-all:
+    post: { summary: Resolve all open alerts, responses: { "204": { $ref: "#/components/responses/NoContent" } } }
   /storage/{id}:
     parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
     patch: { summary: "Update name, endpoint or credentials (admin); empty secretKey keeps the current one", responses: { "200": { description: OK } } }

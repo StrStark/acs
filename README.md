@@ -155,6 +155,18 @@ Provider presets are included for **ArvanCloud** (Simin `ir-thr-at1` and Shahria
 > [!NOTE]
 > Deleting a mirror bucket only removes the mapping; files at the provider are never touched. Versioning, quotas and lifecycle rules for mirror buckets are managed at the provider.
 
+## 🛟 No backups needed: storage that describes itself
+
+ACS keeps a live copy of its own metadata (users, access keys, buckets, the object index and settings) on **every** drive and S3 provider it uses, inside a small `.acs/` folder. Changes reach drives within about a second and providers within five. Any single drive or provider is enough to rebuild the whole server.
+
+- **Move to a new machine**: mount a drive (or connect a provider) on a fresh install, and the setup page offers **Restore** instead of creating an account. Users, keys, buckets, versions and share links come back as they were.
+- **Drives that move are found**: mount a parent directory (`- /mnt:/drives:rslave`) and ACS scans it. A drive that shows up at a new path is re-attached automatically; a drive from another ACS server can be **imported** with all its buckets.
+- **Missing data is reported**: a quick check every 6 hours and a weekly deep check (checksums, throttled) compare every object with the data on its drive or provider. Missing or corrupt objects, offline storage and failing metadata copies show up under **Alerts** and fire webhooks (`object.missing`, `object.corrupt`, `backend.offline`, `replica.failed`, `storage.foreign`), including on the new machine after a restore.
+- **Secrets stay locked**: stored secrets are sealed with a **recovery passphrase** you set under **Settings → Recovery** (Argon2id + AES-GCM). Without it, restore still brings back everything except access-key secrets and provider credentials.
+
+> [!TIP]
+> Data on the built-in disk lives in the `acs-data` volume. Put buckets you can't afford to lose on attached drives or S3 providers, so the data travels with its metadata.
+
 <details>
 <summary><b>Full feature list</b></summary>
 
@@ -270,7 +282,7 @@ curl -H "$KEY" -H 'Content-Type: application/json' http://localhost:8080/api/v1/
 }'
 ```
 
-**Webhooks** fire on `object.created`, `object.deleted`, `bucket.created`, `bucket.deleted`, `share.created`, `share.downloaded` and `share.uploaded`. Each delivery is signed and retried with exponential backoff:
+**Webhooks** fire on `object.created`, `object.deleted`, `bucket.created`, `bucket.deleted`, `share.created`, `share.downloaded` and `share.uploaded`, plus storage-health events (`object.missing`, `object.corrupt`, `backend.offline`, `replica.failed`, `storage.foreign`). Each delivery is signed and retried with exponential backoff:
 
 ```js
 // Verify an ACS webhook (Node.js)
@@ -317,6 +329,7 @@ All settings are environment variables; put overrides in a `.env` file next to `
 | `ACS_S3_LISTEN` | `:9000` | S3 listen address (`off` disables the S3 API) |
 | `ACS_S3_DOMAIN` | — | Enables virtual-hosted-style S3 (`bucket.<domain>`) |
 | `ACS_DATA_DIR` | `/data` | Metadata, objects and the master key |
+| `ACS_DRIVES_ROOT` | `/drives` | Scanned for attached drives and ACS metadata copies |
 | `ACS_MASTER_KEY` | — | Base64 32-byte key for encrypting secrets; generated into the data dir if unset |
 | `ACS_COOKIE_SECURE` | `false` | Set `true` behind HTTPS |
 | `ACS_SESSION_TTL` | `168h` | Login session lifetime (sliding) |
@@ -346,7 +359,7 @@ Then set `ACS_COOKIE_SECURE=true`, and under **Settings** set the public panel U
 <details>
 <summary><b>Backups</b></summary>
 
-Everything lives in the data volume: `acs.db` (users, keys, shares, settings), `meta/` (object index), `objects/` (data) and `master.key`. Stop the container (or take a filesystem snapshot) and copy the directory. **Keep `master.key` safe**: without it, stored access-key and webhook secrets can't be decrypted.
+Metadata is copied to every attached drive and S3 provider automatically (see [No backups needed](#-no-backups-needed-storage-that-describes-itself)), so a separate backup is only needed for **data on the built-in disk**. Everything lives in the data volume: `acs.db` (users, keys, shares, settings), `meta/` (object index), `objects/` (data) and `master.key`. Stop the container (or take a filesystem snapshot) and copy the directory. Set a recovery passphrase or keep `master.key` safe: without one of them, stored access-key and webhook secrets can't be decrypted.
 </details>
 
 ## 🛠️ Development
@@ -369,6 +382,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the code layout and guidelines.
 - [x] Web panel, share links, file requests, scoped access keys
 - [x] REST API, signed webhooks, audit log, Prometheus metrics
 - [x] Attached drives and S3 providers as storage (store and mirror modes)
+- [x] Self-describing storage: metadata on every drive, restore, drive discovery, integrity alerts
 - [ ] Move a bucket between storage backends
 - [ ] Server-side encryption at rest
 - [ ] Erasure coding across drives on a single node

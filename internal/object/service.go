@@ -46,6 +46,7 @@ type Event struct {
 
 type Service struct {
 	db       *pebble.DB
+	metaDir  string
 	local    *blob.Local
 	backends Backends
 
@@ -56,6 +57,11 @@ type Service struct {
 	bucketMu sync.RWMutex
 
 	lastSeq atomic.Int64
+
+	// Metadata journal (see journal.go).
+	jseq     atomic.Uint64
+	inflight inflightSet
+	journal  func(Record)
 
 	evMu     sync.RWMutex
 	handlers []func(Event)
@@ -72,7 +78,9 @@ func Open(metaDir, dataDir string) (*Service, error) {
 		db.Close()
 		return nil, err
 	}
-	return &Service{db: db, local: local}, nil
+	s := &Service{db: db, metaDir: metaDir, local: local}
+	s.loadSeqFloor()
+	return s, nil
 }
 
 func (s *Service) Close() error { return s.db.Close() }
@@ -197,7 +205,13 @@ func setJSON(b *pebble.Batch, key []byte, v any) {
 
 func (s *Service) commit(b *pebble.Batch) error {
 	defer b.Close()
-	return b.Commit(pebble.Sync)
+	seq := s.beginSeq()
+	defer s.endSeq(seq)
+	if err := b.Commit(pebble.Sync); err != nil {
+		return err
+	}
+	s.journalBatch(seq, b)
+	return nil
 }
 
 // scan iterates keys in [start, end) calling fn until it returns false.

@@ -30,8 +30,8 @@ type Store interface {
 	Open(ctx context.Context, id string, offset int64) (io.ReadCloser, error)
 	// Delete removes a blob; deleting a missing blob is not an error.
 	Delete(ctx context.Context, id string) error
-	// Walk calls fn for every stored blob (used by the orphan scrubber).
-	Walk(ctx context.Context, fn func(id string, modTime time.Time) error) error
+	// Walk calls fn for every stored blob (orphan scrubber, inventory checks).
+	Walk(ctx context.Context, fn func(id string, modTime time.Time, size int64) error) error
 }
 
 // NewID returns a random blob ID.
@@ -141,7 +141,7 @@ func (s *Local) Delete(ctx context.Context, id string) error {
 	return err
 }
 
-func (s *Local) Walk(ctx context.Context, fn func(id string, modTime time.Time) error) error {
+func (s *Local) Walk(ctx context.Context, fn func(id string, modTime time.Time, size int64) error) error {
 	return filepath.WalkDir(filepath.Join(s.root, "blobs"), func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -156,6 +156,6 @@ func (s *Local) Walk(ctx context.Context, fn func(id string, modTime time.Time) 
 		if err != nil {
 			return nil // removed concurrently
 		}
-		return fn(d.Name(), info.ModTime())
+		return fn(d.Name(), info.ModTime(), info.Size())
 	})
 }

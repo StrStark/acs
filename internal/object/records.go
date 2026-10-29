@@ -93,6 +93,8 @@ type PartRef struct {
 	Size int64  `json:"s"`
 	// Store is the backend holding the blob ("" = built-in disk).
 	Store string `json:"st,omitempty"`
+	// Sum is the blob's MD5 (hex), used by deep integrity checks.
+	Sum string `json:"h,omitempty"`
 }
 
 // PartsCount returns the number of multipart parts, or 0 for a simple upload.
@@ -124,7 +126,7 @@ type Part struct {
 	ModTime time.Time `json:"mt"`
 }
 
-func (p *Part) ref() PartRef { return PartRef{Blob: p.Blob, Size: p.Size, Store: p.Store} }
+func (p *Part) ref() PartRef { return PartRef{Blob: p.Blob, Size: p.Size, Store: p.Store, Sum: p.ETag} }
 
 // Stats are maintained incrementally per bucket.
 type Stats struct {

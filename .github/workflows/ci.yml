@@ -40,3 +40,5 @@ jobs:
       - uses: actions/checkout@v4
       - name: S3 compatibility (AWS CLI, boto3, rclone)
         run: test/e2e/run_all.sh
+      - name: Disaster recovery (restore from a moved drive, alerts, import)
+        run: test/e2e/recovery.sh

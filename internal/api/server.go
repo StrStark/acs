@@ -30,6 +30,7 @@ type Deps struct {
 	Settings *settings.Store
 	Metrics  *metrics.Registry
 	Storage  *storage.Manager
+	Recovery *Recovery
 }
 
 type Server struct {
@@ -43,6 +44,7 @@ type Server struct {
 	settings *settings.Store
 	metrics  *metrics.Registry
 	storage  *storage.Manager
+	recovery *Recovery
 	limiter  *auth.AttemptLimiter
 	// shareLimiter throttles share password attempts per client.
 	shareLimiter *auth.AttemptLimiter
@@ -61,6 +63,7 @@ func NewServer(d Deps) *Server {
 		settings:     d.Settings,
 		metrics:      d.Metrics,
 		storage:      d.Storage,
+		recovery:     d.Recovery,
 		limiter:      auth.NewAttemptLimiter(10, time.Minute),
 		shareLimiter: auth.NewAttemptLimiter(20, time.Minute),
 		startedAt:    time.Now(),
@@ -78,6 +81,7 @@ func (s *Server) Handler(panel http.Handler) http.Handler {
 	// Setup and session auth.
 	m.HandleFunc("GET /api/v1/setup", s.handleSetupStatus)
 	m.HandleFunc("POST /api/v1/setup", s.handleSetup)
+	m.HandleFunc("POST /api/v1/setup/restore", s.handleRestore)
 	m.HandleFunc("POST /api/v1/auth/login", s.handleLogin)
 	m.HandleFunc("POST /api/v1/auth/logout", s.handleLogout)
 	m.HandleFunc("GET /api/v1/auth/me", a(s.handleMe))
@@ -144,6 +148,17 @@ func (s *Server) Handler(panel http.Handler) http.Handler {
 	m.HandleFunc("PATCH /api/v1/storage/{id}", a(s.handleUpdateStorage))
 	m.HandleFunc("DELETE /api/v1/storage/{id}", a(s.handleDeleteStorage))
 	m.HandleFunc("POST /api/v1/storage/{id}/check", a(s.handleCheckStorage))
+	m.HandleFunc("GET /api/v1/storage/discover", a(s.handleDiscover))
+	m.HandleFunc("POST /api/v1/storage/import", a(s.handleImportDrive))
+
+	// Recovery and integrity.
+	m.HandleFunc("GET /api/v1/settings/recovery", a(s.handleGetRecovery))
+	m.HandleFunc("PUT /api/v1/settings/recovery", a(s.handleSetRecovery))
+	m.HandleFunc("GET /api/v1/alerts", a(s.handleListAlerts))
+	m.HandleFunc("GET /api/v1/alerts/summary", a(s.handleAlertSummary))
+	m.HandleFunc("POST /api/v1/alerts/resolve-all", a(s.handleResolveAllAlerts))
+	m.HandleFunc("POST /api/v1/alerts/check", a(s.handleRunCheck))
+	m.HandleFunc("POST /api/v1/alerts/{id}/resolve", a(s.handleResolveAlert))
 
 	// Administration.
 	m.HandleFunc("GET /api/v1/settings", a(s.handleGetSettings))

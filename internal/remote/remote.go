@@ -224,7 +224,7 @@ func (s blobStore) Delete(ctx context.Context, id string) error {
 	return mapErr(s.b.core.Client.RemoveObject(ctx, s.b.bucket, s.key(id), minio.RemoveObjectOptions{}))
 }
 
-func (s blobStore) Walk(ctx context.Context, fn func(id string, modTime time.Time) error) error {
+func (s blobStore) Walk(ctx context.Context, fn func(id string, modTime time.Time, size int64) error) error {
 	for o := range s.b.core.Client.ListObjects(ctx, s.b.bucket, minio.ListObjectsOptions{
 		Prefix: s.b.prefix + internalDir + "blobs/", Recursive: true,
 	}) {
@@ -235,7 +235,7 @@ func (s blobStore) Walk(ctx context.Context, fn func(id string, modTime time.Tim
 		if !blob.ValidID(id) {
 			continue
 		}
-		if err := fn(id, o.LastModified); err != nil {
+		if err := fn(id, o.LastModified, o.Size); err != nil {
 			return err
 		}
 	}
@@ -533,4 +533,53 @@ func (v *View) ListUploads(ctx context.Context, prefix, keyMarker, uploadIDMarke
 		out = append(out, &object.Upload{Key: strings.TrimPrefix(u.Key, v.prefix), ID: u.UploadID, Initiated: u.Initiated})
 	}
 	return out, res.IsTruncated, nil
+}
+
+// ---- metadata area ----
+
+// MetaArea returns the backend's ".acs" metadata area (for replication).
+func (b *Backend) MetaArea() *MetaArea { return &MetaArea{b: b, root: b.prefix + internalDir} }
+
+// MetaArea stores ACS metadata files under "<prefix>.acs/".
+type MetaArea struct {
+	b    *Backend
+	root string
+}
+
+// ErrMetaNotExist is returned by MetaArea.Get for missing files.
+var ErrMetaNotExist = errors.New("file does not exist")
+
+func (a *MetaArea) Put(ctx context.Context, name string, r io.Reader, size int64) error {
+	_, err := a.b.core.Client.PutObject(ctx, a.b.bucket, a.root+name, r, size,
+		minio.PutObjectOptions{ContentType: "application/octet-stream", PartSize: partSize})
+	return mapErr(err)
+}
+
+func (a *MetaArea) Get(ctx context.Context, name string) (io.ReadCloser, error) {
+	rc, _, _, err := a.b.core.GetObject(ctx, a.b.bucket, a.root+name, minio.GetObjectOptions{})
+	if err != nil {
+		if errors.Is(mapErr(err), object.ErrNoSuchKey) {
+			return nil, ErrMetaNotExist
+		}
+		return nil, mapErr(err)
+	}
+	return rc, nil
+}
+
+func (a *MetaArea) List(ctx context.Context, prefix string) ([]string, error) {
+	var out []string
+	for o := range a.b.core.Client.ListObjects(ctx, a.b.bucket, minio.ListObjectsOptions{Prefix: a.root + prefix}) {
+		if o.Err != nil {
+			return nil, mapErr(o.Err)
+		}
+		if strings.HasSuffix(o.Key, "/") {
+			continue
+		}
+		out = append(out, strings.TrimPrefix(o.Key, a.root))
+	}
+	return out, nil
+}
+
+func (a *MetaArea) Delete(ctx context.Context, name string) error {
+	return mapErr(a.b.core.Client.RemoveObject(ctx, a.b.bucket, a.root+name, minio.RemoveObjectOptions{}))
 }

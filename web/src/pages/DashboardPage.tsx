@@ -2,7 +2,7 @@ import { Link } from "react-router";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowRight, Clock, Database, FileStack, HardDrive, type LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
-import { getSettings, getSystemInfo, listAudit, listBuckets } from "../lib/api";
+import { alertSummary, getSettings, getSystemInfo, listAudit, listBuckets } from "../lib/api";
 import { formatBytes, formatDuration, formatNumber, plural, timeAgo } from "../lib/format";
 import { useCan } from "../lib/session";
 import { Alert, Card, CopyField, PageHeader } from "../components/ui";
@@ -13,6 +13,7 @@ export function DashboardPage() {
   const buckets = useQuery({ queryKey: ["buckets"], queryFn: listBuckets });
   const settings = useQuery({ queryKey: ["settings"], queryFn: getSettings });
   const audit = useQuery({ queryKey: ["audit", "recent"], queryFn: () => listAudit({ limit: 8 }), enabled: can.admin });
+  const health = useQuery({ queryKey: ["alert-summary"], queryFn: alertSummary, enabled: can.admin, refetchInterval: 30_000 });
 
   const d = sys.data;
   const usedPct = d && d.disk.total > 0 ? Math.round((d.disk.used / d.disk.total) * 100) : 0;
@@ -22,6 +23,26 @@ export function DashboardPage() {
     <div className="mx-auto max-w-6xl">
       <PageHeader title="Dashboard" description="Overview of this storage server." />
       {sys.error && <Alert>Could not load system info: {sys.error.message}</Alert>}
+      {health.data && (health.data.open > 0 || !health.data.recoveryConfigured) && (
+        <div className="mb-4 space-y-2">
+          {health.data.open > 0 && (
+            <Alert>
+              {plural(health.data.open, "open storage alert")}: some data may be missing or unreachable.{" "}
+              <Link to="/alerts" className="font-medium underline">
+                Review alerts
+              </Link>
+            </Alert>
+          )}
+          {!health.data.recoveryConfigured && (
+            <Alert tone="warning">
+              Set a recovery passphrase so this server can be fully restored from any of its drives, including S3 access keys and provider credentials.{" "}
+              <Link to="/settings#recovery" className="font-medium underline">
+                Set it now
+              </Link>
+            </Alert>
+          )}
+        </div>
+      )}
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <Stat icon={Database} label="Buckets" loading={sys.isPending}>

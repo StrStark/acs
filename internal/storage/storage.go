@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -23,6 +24,7 @@ import (
 	"acs/internal/blob"
 	"acs/internal/object"
 	"acs/internal/remote"
+	"acs/internal/replica"
 	"acs/internal/secret"
 	"acs/internal/sysinfo"
 )
@@ -102,6 +104,11 @@ type Manager struct {
 	db      *sql.DB
 	box     *secret.Box
 	dataDir string
+
+	// onChange is called after backends are added, removed or restarted.
+	onChange func()
+	// onStatus is called when a backend's health changes.
+	onStatus func(b Backend)
 
 	mu       sync.RWMutex
 	backends map[string]*runtime
@@ -384,6 +391,18 @@ func (m *Manager) Test(ctx context.Context, in Input) error {
 
 // Create validates, tests and saves a new backend.
 func (m *Manager) Create(ctx context.Context, in Input) (Backend, error) {
+	return m.CreateWithID(ctx, newID(), in)
+}
+
+// CreateWithID is Create with a fixed ID, used when importing a provider that
+// another installation wrote to (its metadata refers to that ID).
+func (m *Manager) CreateWithID(ctx context.Context, id string, in Input) (Backend, error) {
+	m.mu.RLock()
+	_, exists := m.backends[id]
+	m.mu.RUnlock()
+	if exists {
+		return Backend{}, &ValidationError{"endpoint", "this storage is already attached"}
+	}
 	if err := in.validate(); err != nil {
 		return Backend{}, err
 	}
@@ -392,7 +411,7 @@ func (m *Manager) Create(ctx context.Context, in Input) (Backend, error) {
 			return Backend{}, err
 		}
 	}
-	b := Backend{ID: newID(), Name: in.Name, Type: in.Type, CreatedAt: time.Now().Truncate(time.Second),
+	b := Backend{ID: id, Name: in.Name, Type: in.Type, CreatedAt: time.Now().Truncate(time.Second),
 		Path: in.Path, Provider: in.Provider, Endpoint: in.Endpoint, Region: in.Region, Bucket: in.Bucket,
 		Prefix: in.Prefix, AccessKey: in.AccessKey, PathStyle: in.PathStyle, InsecureTLS: in.InsecureTLS}
 	rt := &runtime{meta: b}
@@ -416,6 +435,7 @@ func (m *Manager) Create(ctx context.Context, in Input) (Backend, error) {
 	m.backends[b.ID] = rt
 	m.mu.Unlock()
 	m.check(ctx, rt)
+	m.changed()
 	return m.Get(b.ID)
 }
 
@@ -477,6 +497,7 @@ func (m *Manager) Update(ctx context.Context, id string, in Input) (Backend, err
 	m.backends[id] = next
 	m.mu.Unlock()
 	m.check(ctx, next)
+	m.changed()
 	return m.Get(id)
 }
 
@@ -501,6 +522,7 @@ func (m *Manager) Delete(ctx context.Context, id string, inUse bool) error {
 	m.mu.Lock()
 	delete(m.backends, id)
 	m.mu.Unlock()
+	m.changed()
 	return nil
 }
 
@@ -542,8 +564,14 @@ func (m *Manager) check(ctx context.Context, rt *runtime) {
 		st.Error = err.Error()
 	}
 	m.mu.Lock()
+	changed := rt.status.Online != st.Online || rt.status.CheckedAt.IsZero()
 	rt.status = st
+	snap := m.snapshot(rt)
+	cb := m.onStatus
 	m.mu.Unlock()
+	if changed && cb != nil {
+		cb(snap)
+	}
 }
 
 // Run re-checks every backend periodically until ctx ends.
@@ -566,4 +594,144 @@ func (m *Manager) Run(ctx context.Context) {
 		case <-t.C:
 		}
 	}
+}
+
+// ---- hooks for replication, discovery and alerts ----
+
+// OnChange registers a callback for backend additions, removals and restarts.
+func (m *Manager) OnChange(fn func()) { m.onChange = fn }
+
+// OnStatus registers a callback for health changes.
+func (m *Manager) OnStatus(fn func(Backend)) { m.onStatus = fn }
+
+func (m *Manager) changed() {
+	if m.onChange != nil {
+		m.onChange()
+	}
+}
+
+// s3Area adapts a provider's metadata area to replica.Area.
+type s3Area struct{ *remote.MetaArea }
+
+func (a s3Area) Get(ctx context.Context, name string) (io.ReadCloser, error) {
+	rc, err := a.MetaArea.Get(ctx, name)
+	if errors.Is(err, remote.ErrMetaNotExist) {
+		return nil, replica.ErrNotExist
+	}
+	return rc, err
+}
+
+// Target is a running backend that can hold a metadata copy.
+type Target struct {
+	ID, Name, Type string
+	Area           replica.Area
+}
+
+// Targets returns the metadata area of every running backend.
+func (m *Manager) Targets() []Target {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var out []Target
+	for id, rt := range m.backends {
+		if rt.store == nil {
+			continue
+		}
+		t := Target{ID: id, Name: rt.meta.Name, Type: rt.meta.Type}
+		if rt.remote != nil {
+			t.Area = s3Area{rt.remote.MetaArea()}
+		} else {
+			t.Area = replica.NewLocalArea(filepath.Join(rt.meta.Path, ".acs"))
+		}
+		out = append(out, t)
+	}
+	return out
+}
+
+// AreaFor returns a metadata area for an S3 configuration without saving it
+// (used to restore or import from a provider).
+func AreaFor(in Input) (replica.Area, error) {
+	if err := in.validate(); err != nil {
+		return nil, err
+	}
+	rb, err := remote.New(remote.Config{Endpoint: in.Endpoint, Region: in.Region, Bucket: in.Bucket, Prefix: in.Prefix,
+		AccessKey: in.AccessKey, SecretKey: in.SecretKey, PathStyle: in.PathStyle, InsecureTLS: in.InsecureTLS})
+	if err != nil {
+		return nil, &ValidationError{"endpoint", err.Error()}
+	}
+	return s3Area{rb.MetaArea()}, nil
+}
+
+// Relocate finds drives that moved: a drive backend whose marker is no longer
+// at its saved path is looked up by marker under root and its path updated.
+func (m *Manager) Relocate(ctx context.Context, root string) []string {
+	found := replica.Scan(root)
+	var moved []string
+	m.mu.RLock()
+	var lost []*runtime
+	for _, rt := range m.backends {
+		if rt.meta.Type == TypeLocal && rt.store == nil {
+			lost = append(lost, rt)
+		}
+	}
+	m.mu.RUnlock()
+	for _, rt := range lost {
+		for _, f := range found {
+			if f.Marker != rt.meta.ID || f.Path == rt.meta.Path {
+				continue
+			}
+			c := toConfig(rt.meta)
+			c.Path = f.Path
+			cfgJSON, _ := json.Marshal(c)
+			if _, err := m.db.ExecContext(ctx, `UPDATE storage_backends SET config = ? WHERE id = ?`, string(cfgJSON), rt.meta.ID); err != nil {
+				slog.Warn("relocate drive", "backend", rt.meta.Name, "err", err)
+				continue
+			}
+			next := &runtime{meta: rt.meta}
+			next.meta.Path = f.Path
+			if err := m.start(next, "", false); err != nil {
+				continue
+			}
+			m.mu.Lock()
+			m.backends[rt.meta.ID] = next
+			m.mu.Unlock()
+			m.check(ctx, next)
+			moved = append(moved, rt.meta.Name)
+			slog.Info("storage drive found at a new path", "backend", rt.meta.Name, "path", f.Path)
+		}
+	}
+	if len(moved) > 0 {
+		m.changed()
+	}
+	return moved
+}
+
+// AdoptDrive registers a drive that carries another installation's marker,
+// keeping its backend ID so imported buckets find their data.
+func (m *Manager) AdoptDrive(ctx context.Context, id, name, path string) (Backend, error) {
+	m.mu.RLock()
+	_, exists := m.backends[id]
+	m.mu.RUnlock()
+	if exists {
+		return Backend{}, &ValidationError{"path", "a backend with this ID is already attached"}
+	}
+	if name == "" {
+		name = filepath.Base(path)
+	}
+	b := Backend{ID: id, Name: name, Type: TypeLocal, CreatedAt: time.Now().Truncate(time.Second), Path: path}
+	rt := &runtime{meta: b}
+	if err := m.start(rt, "", false); err != nil {
+		return Backend{}, err
+	}
+	cfgJSON, _ := json.Marshal(toConfig(b))
+	if _, err := m.db.ExecContext(ctx,
+		`INSERT INTO storage_backends (id, name, type, config, secret_enc, created_at) VALUES (?, ?, ?, ?, NULL, ?)`,
+		b.ID, b.Name, b.Type, string(cfgJSON), b.CreatedAt.Unix()); err != nil {
+		return Backend{}, err
+	}
+	m.mu.Lock()
+	m.backends[b.ID] = rt
+	m.mu.Unlock()
+	m.check(ctx, rt)
+	m.changed()
+	return m.Get(b.ID)
 }

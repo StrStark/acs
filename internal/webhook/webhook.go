@@ -37,6 +37,7 @@ import (
 var EventTypes = []string{
 	"object.created", "object.deleted", "bucket.created", "bucket.deleted",
 	"share.created", "share.downloaded", "share.uploaded",
+	"object.missing", "object.corrupt", "backend.offline", "replica.failed", "storage.foreign",
 }
 
 var ErrNotFound = errors.New("webhook not found")

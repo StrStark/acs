@@ -154,7 +154,7 @@ func (s *Service) RemoveOrphans(cutoff time.Time) (int, error) {
 			slog.Warn("orphan scrub: store unavailable", "store", id, "err", err)
 			continue
 		}
-		err = st.Walk(ctx, func(blobID string, modTime time.Time) error {
+		err = st.Walk(ctx, func(blobID string, modTime time.Time, _ int64) error {
 			if _, ok := refs[id+"/"+blobID]; ok || modTime.After(cutoff) {
 				return nil
 			}

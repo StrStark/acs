@@ -17,6 +17,9 @@ type Config struct {
 	S3Domain string
 	// DataDir holds the metadata database and object data.
 	DataDir string
+	// DrivesRoot is where attached drives are mounted; it is scanned to find
+	// drives (and ACS metadata copies) automatically.
+	DrivesRoot string
 	// MasterKey (base64, 32 bytes) encrypts stored secrets. If empty, a key
 	// file is generated in DataDir.
 	MasterKey string
@@ -41,6 +44,7 @@ func Load() (Config, error) {
 		S3Listen:     env("ACS_S3_LISTEN", ":9000"),
 		S3Domain:     os.Getenv("ACS_S3_DOMAIN"),
 		DataDir:      env("ACS_DATA_DIR", "./data"),
+		DrivesRoot:   env("ACS_DRIVES_ROOT", "/drives"),
 		MasterKey:    os.Getenv("ACS_MASTER_KEY"),
 		SetupToken:   os.Getenv("ACS_SETUP_TOKEN"),
 		MetricsToken: os.Getenv("ACS_METRICS_TOKEN"),

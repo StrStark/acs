@@ -52,7 +52,15 @@ export type Role = "viewer" | "editor" | "admin";
 
 export type User = { id: number; username: string; role: Role; createdAt: string };
 export type Me = User & { key?: AccessKey };
-export type SetupStatus = { needsSetup: boolean; tokenRequired: boolean };
+export type RestoreCandidate = {
+  path: string;
+  siteName: string;
+  backendName: string;
+  updatedAt: string;
+  buckets: string[] | null;
+  hasKeyring: boolean;
+};
+export type SetupStatus = { needsSetup: boolean; tokenRequired: boolean; restorable?: RestoreCandidate[] };
 
 export type Stats = { objects: number; bytes: number; storedBytes: number };
 export type LifecycleRule = {
@@ -366,13 +374,19 @@ export type StorageBackend = {
   status: BackendStatus;
   buckets: number;
   storedBytes: number;
+  /** Health of the metadata copy kept on this backend. */
+  replica?: ReplicaStatus;
 };
+export type ReplicaStatus = { syncedAt?: string; lastSeq: number; error?: string; foreign?: string; foreignSite?: string };
 export type StorageList = {
   builtin: { id: ""; name: string; type: "local"; path?: string; builtin: true; status: BackendStatus };
   builtinBuckets: number;
   builtinStoredBytes: number;
+  builtinReplica?: ReplicaStatus;
+  recoveryConfigured: boolean;
   backends: StorageBackend[];
 };
+export type ExistingACS = { siteName: string; buckets: string[] | null; updatedAt: string; foreign: boolean };
 export type BackendInput = {
   name: string;
   type: "local" | "s3";
@@ -388,8 +402,66 @@ export type BackendInput = {
   insecureTls?: boolean;
 };
 export const listStorage = () => api<StorageList>("/storage");
-export const createStorage = (body: BackendInput) => api<StorageBackend>("/storage", { method: "POST", body });
-export const testStorage = (body: BackendInput) => api<{ ok: boolean; error?: string }>("/storage/test", { method: "POST", body });
+export type ImportResult = { backend: StorageBackend; imported: string[]; skipped: string[] };
+/** Creates a backend. With import, also takes over the buckets of the ACS installation that wrote to it. */
+export const createStorage = (body: BackendInput & { import?: boolean }) =>
+  api<StorageBackend | ImportResult>("/storage", { method: "POST", body });
+export const testStorage = (body: BackendInput) =>
+  api<{ ok: boolean; error?: string; existing?: ExistingACS }>("/storage/test", { method: "POST", body });
 export const updateStorage = (id: string, body: BackendInput) => api<StorageBackend>(`/storage/${id}`, { method: "PATCH", body });
 export const deleteStorage = (id: string) => api<void>(`/storage/${id}`, { method: "DELETE" });
 export const checkStorage = (id: string) => api<StorageBackend>(`/storage/${id}/check`, { method: "POST", body: {} });
+
+// ---- self-describing storage: discovery, restore, recovery, alerts ----
+
+export type DiscoveredDrive = {
+  path: string;
+  state: "attached" | "detached" | "foreign" | "empty";
+  backendId?: string;
+  backendName?: string;
+  siteName?: string;
+  updatedAt?: string;
+  buckets?: string[];
+};
+export const discoverStorage = () => api<DiscoveredDrive[]>("/storage/discover");
+export const importDrive = (body: { path: string; name?: string }) => api<ImportResult>("/storage/import", { method: "POST", body });
+
+export const restoreFromStorage = (body: { path?: string; s3?: BackendInput; passphrase: string; setupToken?: string }) =>
+  api<{ restarting: boolean; siteName: string; secretsRestored: boolean }>("/setup/restore", { method: "POST", body });
+
+export const getRecovery = () => api<{ configured: boolean }>("/settings/recovery");
+export const setRecovery = (body: { passphrase: string; currentPassword: string }) =>
+  api<void>("/settings/recovery", { method: "PUT", body });
+
+export type AlertKind = "object.missing" | "object.corrupt" | "backend.offline" | "replica.failed" | "storage.foreign";
+export type StorageAlert = {
+  id: number;
+  kind: AlertKind;
+  severity: "critical" | "warning" | "info";
+  title: string;
+  detail?: string;
+  bucket?: string;
+  key?: string;
+  backend?: string;
+  count: number;
+  firstSeen: string;
+  lastSeen: string;
+  resolvedAt?: string;
+};
+export type CheckReport = {
+  startedAt: string;
+  deep: boolean;
+  objects: number;
+  blobs: number;
+  missing: number;
+  corrupt: number;
+  offline: number;
+  took: number;
+  error?: string;
+};
+export type AlertSummary = { open: number; lastCheck?: CheckReport | null; checking: boolean; recoveryConfigured: boolean };
+export const listAlerts = (state: "open" | "resolved" | "all" = "open") => api<StorageAlert[]>(`/alerts${qs({ state })}`);
+export const alertSummary = () => api<AlertSummary>("/alerts/summary");
+export const resolveAlert = (id: number) => api<void>(`/alerts/${id}/resolve`, { method: "POST", body: {} });
+export const resolveAllAlerts = () => api<void>("/alerts/resolve-all", { method: "POST", body: {} });
+export const runIntegrityCheck = (deep: boolean) => api<{ started: boolean }>("/alerts/check", { method: "POST", body: { deep } });

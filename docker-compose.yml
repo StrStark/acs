@@ -22,7 +22,11 @@ services:
       ACS_S3_DOMAIN: ${ACS_S3_DOMAIN:-}
     volumes:
       - acs-data:/data
-      # Attach extra drives, then add them under Storage in the panel, e.g.:
+      # Attach extra drives, then add them under Storage in the panel. Mounting
+      # a parent directory lets ACS discover drives (and re-attach moved ones)
+      # on its own, and restore from them on a new machine:
+      #   - /mnt:/drives:rslave
+      # or one drive at a time:
       #   - /mnt/disk2:/drives/disk2
       # The container runs as UID 65532: `sudo chown -R 65532:65532 /mnt/disk2`
 
